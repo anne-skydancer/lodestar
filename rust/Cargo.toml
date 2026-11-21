@@ -1,0 +1,6 @@
+[package]
+name = "lodestar"
+version = "0.1.0"
+edition = "2021"
+links = "lodestar_c"
+description = "Rust bindings for the Lodestar mesh LOD prototype"
