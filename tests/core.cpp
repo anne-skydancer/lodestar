@@ -180,6 +180,22 @@ void testSceneImport(const char* path) {
     }
 }
 
+void testGeometrySimplification() {
+    const std::array positions{0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 2.f, 0.f, 0.f,
+                               0.f, 1.f, 0.f, 1.f, 1.f, 0.f, 2.f, 1.f, 0.f,
+                               0.f, 2.f, 0.f, 1.f, 2.f, 0.f, 2.f, 2.f, 0.f};
+    const std::array<uint32_t, 24> indices{0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4,
+                                           3, 4, 7, 3, 7, 6, 4, 5, 8, 4, 8, 7};
+    std::array<uint8_t, 9> locks{};
+    auto candidate = simplifyGeometry(positions, indices, locks, 2, 0.00001f, true);
+    require(candidate.indices.size() == 6 * 3 && candidate.estimatedError <= 0.00001f &&
+                std::ranges::find(candidate.indices, 4) == candidate.indices.end(),
+            "Geometry simplification reduces an interior fan within the absolute error bound");
+    locks[4] = 1;
+    candidate = simplifyGeometry(positions, indices, locks, 2, 0.00001f, true);
+    require(std::ranges::equal(candidate.indices, indices), "Locked original vertex and boundary survive simplification");
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -187,6 +203,7 @@ int main(int argc, char** argv) {
         const auto sample = lodestar::sampleAsset();
         testSample(sample);
         testFallbacks(sample);
+        testGeometrySimplification();
         if (argc > 1) testSceneImport(argv[1]);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

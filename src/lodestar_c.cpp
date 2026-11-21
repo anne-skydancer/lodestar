@@ -1,6 +1,7 @@
 #include <lodestar/lodestar.hpp>
 #include <lodestar/lodestar_c.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <exception>
 #include <limits>
@@ -31,6 +32,15 @@ struct lodestar_mesh {
     std::vector<uint32_t> triangleSurfaceIds;
     bool hasUnrepresentedVertexAttributes = false;
 };
+
+struct lodestar_collision_mesh {
+    std::vector<lodestar_collision_vertex> positions;
+    std::vector<uint32_t> indices;
+    size_t skippedDegenerateTriangles = 0;
+};
+
+static_assert(sizeof(lodestar_collision_vertex) == sizeof(float[3]));
+static_assert(alignof(lodestar_collision_vertex) == alignof(float));
 
 namespace {
 
@@ -283,6 +293,56 @@ lodestar_status lodestar_asset_generate_seam(const lodestar_asset* asset, size_t
     return generateOwnedMesh(asset, result, [&](const lodestar_asset& input) {
         return seamMesh(input, targetTriangles);
     });
+}
+
+lodestar_status lodestar_simplify_geometry(const float* positions, size_t vertexCount, const uint32_t* indices,
+                                         size_t indexCount, const uint8_t* vertexLocks, size_t targetTriangles,
+                                         float maxAbsoluteError, uint32_t lockBoundary, uint32_t* outputIndices,
+                                         size_t* outputCount, float* estimatedError) {
+    if (!positions || !indices || !outputIndices || !outputCount || !estimatedError || lockBoundary > 1 ||
+        vertexCount > std::numeric_limits<size_t>::max() / 3) {
+        return fail(LODESTAR_INVALID_ARGUMENT, "Geometry simplification requires valid buffers and outputs");
+    }
+    return checked([&] {
+        const auto locks = vertexLocks ? std::span(vertexLocks, vertexCount) : std::span<const uint8_t>{};
+        const auto result = lodestar::simplifyGeometry(std::span(positions, vertexCount * 3),
+            std::span(indices, indexCount), locks, targetTriangles, maxAbsoluteError, lockBoundary != 0);
+        std::copy(result.indices.begin(), result.indices.end(), outputIndices);
+        *outputCount = result.indices.size();
+        *estimatedError = result.estimatedError;
+    });
+}
+
+lodestar_status lodestar_asset_generate_collision(const lodestar_asset* asset, lodestar_collision_mesh** result) {
+    if (!result) return fail(LODESTAR_INVALID_ARGUMENT, "Collision mesh output is required");
+    *result = nullptr;
+    if (!asset) return fail(LODESTAR_INVALID_ARGUMENT, "Asset is required");
+    return checked([&] {
+        auto mesh = lodestar::buildCollisionMesh(asset->value.original);
+        auto output = std::make_unique<lodestar_collision_mesh>();
+        output->positions.reserve(mesh.positions.size());
+        for (const auto& position : mesh.positions) {
+            output->positions.push_back({{position[0], position[1], position[2]}});
+        }
+        output->indices = std::move(mesh.indices);
+        output->skippedDegenerateTriangles = mesh.skippedDegenerateTriangles;
+        *result = output.release();
+    });
+}
+
+lodestar_status lodestar_collision_mesh_get_view(const lodestar_collision_mesh* mesh,
+                                                 lodestar_collision_mesh_view* result) {
+    if (!mesh || !result) {
+        return fail(LODESTAR_INVALID_ARGUMENT, "Collision mesh and view output are required");
+    }
+    lastError[0] = '\0';
+    *result = {mesh->positions.data(), mesh->positions.size(), mesh->indices.data(), mesh->indices.size(),
+               mesh->skippedDegenerateTriangles};
+    return LODESTAR_OK;
+}
+
+void lodestar_collision_mesh_destroy(lodestar_collision_mesh* mesh) {
+    delete mesh;
 }
 
 lodestar_status lodestar_mesh_get_view(const lodestar_mesh* mesh, lodestar_mesh_view* result) {

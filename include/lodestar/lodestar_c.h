@@ -20,6 +20,7 @@ extern "C" {
 
 typedef struct lodestar_asset lodestar_asset;
 typedef struct lodestar_mesh lodestar_mesh;
+typedef struct lodestar_collision_mesh lodestar_collision_mesh;
 
 typedef uint32_t lodestar_status;
 enum {
@@ -78,6 +79,18 @@ typedef struct lodestar_mesh_view {
     size_t index_count;
     uint32_t has_uv;
 } lodestar_mesh_view;
+
+typedef struct lodestar_collision_vertex {
+    float position[3];
+} lodestar_collision_vertex;
+
+typedef struct lodestar_collision_mesh_view {
+    const lodestar_collision_vertex* positions;
+    size_t position_count;
+    const uint32_t* indices;
+    size_t index_count;
+    size_t skipped_degenerate_triangles;
+} lodestar_collision_mesh_view;
 
 typedef struct lodestar_mesh_metadata {
     const uint32_t* triangle_materials;
@@ -162,6 +175,20 @@ LODESTAR_C_API lodestar_status lodestar_asset_generate_planar(const lodestar_ass
 /* Reuses the asset's seam analysis. The returned count can exceed the requested target. */
 LODESTAR_C_API lodestar_status lodestar_asset_generate_seam(const lodestar_asset* asset, size_t target_triangles,
                                                          lodestar_mesh** result);
+/* Experimental geometry-only simplification. Positions contain 3 floats per vertex.
+ * Optional vertex_locks contains one 0 or 1 byte per vertex. Output has capacity for
+ * index_count entries. The final indices refer to the original position buffer. */
+LODESTAR_C_API lodestar_status lodestar_simplify_geometry(
+    const float* positions, size_t vertex_count, const uint32_t* indices, size_t index_count,
+    const uint8_t* vertex_locks, size_t target_triangles, float max_absolute_error, uint32_t lock_boundary,
+    uint32_t* output_indices, size_t* output_count, float* estimated_error);
+/* Build an owned static triangle collider in the imported source coordinate space. */
+LODESTAR_C_API lodestar_status lodestar_asset_generate_collision(const lodestar_asset* asset,
+                                                               lodestar_collision_mesh** result);
+/* A view borrows the collider buffers until lodestar_collision_mesh_destroy is called. */
+LODESTAR_C_API lodestar_status lodestar_collision_mesh_get_view(const lodestar_collision_mesh* mesh,
+                                                               lodestar_collision_mesh_view* result);
+LODESTAR_C_API void lodestar_collision_mesh_destroy(lodestar_collision_mesh* mesh);
 /* A view borrows the mesh buffers until lodestar_mesh_destroy is called. */
 LODESTAR_C_API lodestar_status lodestar_mesh_get_view(const lodestar_mesh* mesh, lodestar_mesh_view* result);
 /* Material IDs are provided in triangle order when available. The mesh owns the IDs. */

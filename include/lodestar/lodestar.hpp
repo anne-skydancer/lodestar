@@ -2,10 +2,12 @@
 
 #include <glm/glm.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -36,6 +38,17 @@ struct Mesh {
     // Includes source color, skin, morph, and tangent data absent from Vertex.
     bool hasUnrepresentedVertexAttributes = false;
 };
+
+struct CollisionMesh {
+    std::vector<std::array<float, 3>> positions;
+    std::vector<uint32_t> indices;
+    std::size_t skippedDegenerateTriangles = 0;
+};
+
+// Build static triangle collision in the source coordinate space. Every nondegenerate
+// source triangle keeps its position and winding. Malformed indices or referenced
+// nonfinite positions throw std::invalid_argument.
+CollisionMesh buildCollisionMesh(const Mesh& source);
 
 struct TopologyReport {
     bool valid = false;
@@ -131,6 +144,15 @@ SphereFit fitSphere(const Mesh& mesh);
 SphereEligibility sphereEligibility(const Mesh& mesh, const SphereFit& fit);
 Mesh sphereMesh(const SphereFit& fit, int segments, int rings);
 Mesh simplifyMesh(const Mesh& mesh, float fraction);
+struct GeometryReduction {
+    std::vector<uint32_t> indices;
+    float estimatedError = 0.0f;
+};
+// Simplify an indexed position buffer using original vertices and an absolute
+// meshoptimizer error budget. Callers validate application-specific shape and topology.
+GeometryReduction simplifyGeometry(std::span<const float> positions, std::span<const uint32_t> indices,
+                                   std::span<const uint8_t> lockedVertices, std::size_t targetTriangles,
+                                   float maxError, bool lockBoundary);
 void normalizeMesh(Mesh& mesh);
 
 class PlanarAnalysis {

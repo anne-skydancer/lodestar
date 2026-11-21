@@ -19,7 +19,7 @@ ARCHIVES = (
     (
         "https://github.com/user-attachments/files/18457327/TestHall_models_new_2.zip",
         "ea364444d21296c20656b80a92e4324204c4765606f899490da5b5d64e91dbb0",
-        ("TestHall_MESH.dae", "TestHall_LOD2.dae"),
+        ("TestHall_MESH.dae", "TestHall_LOD2.dae", "TestHall_PHYS.dae"),
     ),
     (
         "https://github.com/user-attachments/files/18457007/simplebot.zip",

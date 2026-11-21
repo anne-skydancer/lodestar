@@ -35,6 +35,7 @@ With no arguments, Lodestar opens a built-in UV-free sphere. To open your own me
 | `3` | View the analytic sphere when eligible. Otherwise, Lodestar shows the original and reports the reason. |
 | `4` | View the planar simplification. The triangle count can remain above the requested target when constraints prevent further reduction. |
 | `5` | View the exact seam simplification. It shortens eligible straight boundary chains while preserving their geometry and attributes. |
+| `6` | View the static physics mesh created from the imported source. |
 | `Up` / `Down` or `+` / `-` | Adjust the LOD quality from 1 to 12. |
 | `Left` / `Right`, `W` / `S` | Orbit horizontally or vertically. |
 | `Page Up` / `Page Down` | Zoom in or out. |
@@ -52,6 +53,31 @@ Run `--inspect` for a terminal comparison without opening a window.
 Inspection reports vertex and triangle counts, indexed and geometric topology, a fixed-boundary triangle bound, sphere fit and eligibility, and the planar and seam minimums. For seam mode it includes the number of removable boundary positions. Timings cover import and analysis, mesh generation, planar and seam preparation, and analytic tessellation when available. They exclude rendering and GPU uploads. Use identical assets and quality levels when comparing runs.
 
 In the Windows Release build at quality 4, the built-in sphere had 3,968 source triangles, 318 baseline triangles, and 960 analytic triangles. The maximum inward deviation of the source triangles was about 0.24% of the fitted radius. Quality controls the baseline target and analytic tessellation density independently.
+
+## Generate a conforming physics mesh
+
+On file open or drop, the viewer creates static collision triangles from the same source positions and triangle winding it renders in Original mode. This works with externally authored COLLADA and glTF files. A visual LOD change reuses the source collider, so physical openings and walkable surfaces stay in the same place as the camera moves. All nonzero-area source triangles participate, including decorative surfaces.
+
+Export those triangles as a COLLADA physics file in the source scene's coordinate system and scale.
+
+```powershell
+.\build\Release\inverseglod.exe --export-physics build/model-physics.dae C:\path\to\model.dae
+```
+
+The export flattens the imported scene into one static mesh. For Second Life's per-object physics workflow, export the corresponding object separately, select the file in the uploader's Physics tab, and set the rezzed object's **Physics Shape Type** to **Prim** when using that custom shape. Check openings and walkable surfaces at their final in-world scale. [Second Life mesh upload and physics settings](https://community.secondlife.com/knowledgebase/english/uploading-a-mesh-model-r274/)
+
+### TestHall authored physics repair
+
+The published TestHall fixture includes an authored collider with a false blockage near `Wing2Break`. After applying the archived physics file's X offset of −13.13098 m for measurement, a 1.69 m tall, 0.22 m radius capsule overlaps the authored collider by 2.87 cm along the test route. Replacing `Wing2Break_PHYS` with Lodestar's source triangles gives the same route 2.15 cm of clearance after reimport. The nearby wall still blocks passage, a second route stays open, and the measured floor height stays at 7.91017 m. [Second Life TestHall fixture](https://wiki.secondlife.com/wiki/Mesh_Import_test#Models_with_more_than_8_unique_faces_can_be_imported)
+
+```powershell
+$corpus = Join-Path $env:TEMP 'lodestar-corpus'
+py -B tools/fetch_benchmark_assets.py $corpus
+py -B tools/check_testhall_physics.py $corpus build/testhall-physics-litmus `
+    --library build/Release/lodestar_c.dll --lodestar build/Release/inverseglod.exe
+```
+
+The check writes `testhall-repaired-physics.dae` and `report.json`. It replaces 272 triangles with 1,104 and retains the original 686 triangles across the other 11 collider parts. These are offline geometric checks on a static mesh. Second Life avatar movement and physics cost require in-world verification.
 
 ## Benchmark Second Life import samples
 
@@ -133,6 +159,166 @@ Seam mode found zero removable positions and returned all 8,602 source triangles
 
 The imported split-seam control shortened both sides of a seam with different materials, normals, and UVs. A single coupled removal reduced four triangles to two with zero sampled surface displacement and silhouette error. The original fixed-boundary comparison still had a four-triangle bound. Median preparation and replay took 0.0048 ms and 0.0001 ms. Separate controls with a UV or normal break at the middle kept all four triangles.
 
+### TestHall diffuse bake proof
+
+`tools/bake_planar_patch.py` exports a rectangular patch as two triangles with a new UV map and an embedded PNG. The TestHall proof uses four scene-space faces from `Wing2Break`, selected by their zero-based imported indices. `DirtyConcrete-material` binds `CrackedConcrete__DIFF.tga` through UV set 0. The texture archive contains the test images and no separate asset license. The proof uses local copies. [Second Life Wiki texture test and download](https://wiki.secondlife.com/wiki/Mesh_Import_test#Textures)
+
+Use the corpus directory from the benchmark above and a Release build of the C library.
+
+```powershell
+py -m pip install numpy Pillow
+$textureZip = Join-Path $corpus 'TestHall_textures.zip'
+Invoke-WebRequest -Uri 'https://github.com/user-attachments/files/18456930/TestHall_textures.zip' -OutFile $textureZip
+$textures = Join-Path $corpus 'TestHall_textures'
+Expand-Archive -LiteralPath $textureZip -DestinationPath $textures -Force
+$proof = 'build/testhall-texture-bake'
+New-Item -ItemType Directory -Path $proof -Force | Out-Null
+py tools/bake_planar_patch.py (Join-Path $corpus 'TestHall_MESH.dae') (Join-Path $textures 'CrackedConcrete__DIFF.tga') `
+    (Join-Path $proof 'testhall-patch.glb') --library build/Release/lodestar_c.dll `
+    --faces 5052,5053,5060,5061 --resolution 1024 --preview (Join-Path $proof 'comparison.png') `
+    --report (Join-Path $proof 'report.json')
+```
+
+The exporter uses bilinear sampling with repeated source UVs and clamps the baked texture at its edges. The unlit GLB approximates the patch's diffuse appearance under this sampling model. The report compares 65,536 offset samples, separate from the bake grid. Errors are absolute differences in 8-bit sRGB channel values. The preview shows the sampled source, the bake, and a magnified error image.
+
+| Atlas | GLB bytes | Mean error | 95th percentile | Maximum error |
+| --- | ---: | ---: | ---: | ---: |
+| 512 × 512 | 224,712 | 4.460 | 12.669 | 49.394 |
+| 1,024 × 1,024 | 779,572 | 0.681 | 2.777 | 25.719 |
+
+Both resolutions reduce the patch from four triangles to two. In a separate geometry comparison, the reimported GLB had zero sampled surface displacement and zero silhouette error across 13 views at 384 × 384. The test covers the selected patch's opaque diffuse color. Full-scene materials and shader lighting are outside its scope.
+
+### Wing2Break multi-patch atlas
+
+`tools/bake_section_atlas.py` processes the entire named `Wing2Break` node. It resolves the seven opaque diffuse textures from the COLLADA material bindings. It finds rectangular patches, retains boundary points shared with neighboring geometry, and packs the accepted patches into one texture with two-texel gutters. Triangles outside those patches keep their original geometry, normals, and texture mapping.
+
+Use the corpus and extracted texture paths from the preceding example.
+
+```powershell
+py -B tools/bake_section_atlas.py (Join-Path $corpus 'TestHall_MESH.dae') $textures `
+    build/testhall-section-atlas --library build/Release/lodestar_c.dll --node Wing2Break `
+    --texel-scale 0.75 --max-tile 512 --max-atlas 2048 --supersamples 2 --view-size 512
+```
+
+The run found 26 candidate patches and baked 11. It replaced 44 triangles with 26 and carried forward the other 1,060 source triangles. Seven patches went from four triangles to two. Four kept a shared boundary point and went from four triangles to three. The output directory contains `source.glb`, `lod.glb`, `atlas.png`, `comparison.png`, and `report.json`.
+
+| Measure | Source GLB | Atlas GLB |
+| --- | ---: | ---: |
+| Triangles | 1,104 | 1,086 |
+| Indexed geometry payload | 78,240 bytes | 77,620 bytes |
+| Referenced diffuse images | 7 | 8 |
+| Estimated base-level RGBA8 texture storage | 7,340,032 bytes | 8,989,168 bytes |
+| GLB size | 3,687,060 bytes | 3,962,144 bytes |
+
+All seven original images remain in use on untouched triangles. The added 516 × 799 atlas increases the GLB size and estimated texture storage despite the triangle reduction. The RGBA8 estimate counts each referenced image once at four bytes per texel and covers base levels only. GLB sizes include compressed PNGs, geometry, and container data.
+
+The comparison uses six shared orthographic cameras at 512 × 512, the same directional Lambert light and ambient term, and bilinear texture sampling in linear light. Under this model, both meshes cover the same 342,765 pixels. Whole-node mean, 95th-percentile, and maximum errors are 0.136, 1, and 41 in 8-bit sRGB channel units. On the 27,119 visible baked-patch pixels the same errors are 1.719, 7, and 41. The other compared pixels match exactly. This checks static diffuse color under the common software lighting model. The COLLADA Phong specular response and external renderer lighting are outside the comparison.
+
+After GLB reimport, a separate comparison of 16,384 surface samples per direction found a maximum sampled displacement of 2.9 × 10⁻¹⁶ relative to the source extent. Silhouette error was zero across 13 views at 384 × 384.
+
+For a lower-memory configuration, use `--texel-scale 0.25 --max-tile 256` and a separate output directory. On the same section, this produced a 260 × 291 atlas, a 3,737,636-byte GLB, and an estimated 7,642,672 bytes of base-level RGBA8 textures. The triangle count and six measured silhouettes were identical to the default run. The edited regions had a mean error of 4.18 and a 95th-percentile error of 14 in 8-bit sRGB channel units. On this run, atlas baking and packing took about 90 ms at the lower resolution and 261 ms at the default resolution.
+
+### Wing2Break across UV seams
+
+Add `--cross-uv` to group adjacent triangles with compatible planes and shading normals into simple polygons. The baker samples the original diffuse texture for each source triangle, including when one region uses several textures. It retriangulates each accepted polygon and removes exactly straight boundary points when every incident region can update that point together. Points referenced outside the section stay pinned. The pass retains regions with unsupported boundaries, including holes.
+
+```powershell
+py -B tools/bake_section_atlas.py (Join-Path $corpus 'TestHall_MESH.dae') $textures `
+    build/testhall-cross-uv --library build/Release/lodestar_c.dll --node Wing2Break --cross-uv
+```
+
+The pass accepted 36 of 54 candidate regions, combined 50 internal UV seams, and reduced 1,104 triangles to 1,010 (8.51%). Both atlas sizes retain all 912 triangles outside the baked regions. All six comparison silhouettes matched, and the separate geometry benchmark measured zero silhouette error across its 13 views. At 16,384 surface samples per direction, the maximum sampled displacement was 2.9 × 10⁻¹⁶ relative to the source extent.
+
+| Measure | Source | Default atlas | Compact atlas |
+| --- | ---: | ---: | ---: |
+| Estimated base-level RGBA8 texture storage | 7.00 MiB | 17.01 MiB | 8.84 MiB |
+| Mean RGB error on edited pixels, out of 255 | — | 2.02 | 4.11 |
+| 95th-percentile RGB error on edited pixels, out of 255 | — | 8 | 14 |
+
+Use `--texel-scale 0.25 --max-tile 256` for the compact atlas. Both configurations keep the seven source images in use. The color comparison uses the same fixed diffuse lighting as the rectangle experiment.
+
+### Wing2Break triangle targets
+
+Run the triangle budgets without loading images, then check the exported geometry against the original node and test both openings and the floor in the surrounding TestHall scene.
+
+```powershell
+$source = Join-Path $corpus 'TestHall_MESH.dae'
+$library = 'build/Release/lodestar_c.dll'
+$trial = 'build/wing2break-trials/geometry-993'
+py -B tools/bake_section_atlas.py $source $textures $trial --library $library --cross-uv `
+    --geometry-only --target-triangles 993 --max-boundary-deviation 1e-7
+py -B tools/check_wing2break_geometry.py $source $trial --library $library `
+    --benchmark build/Release/lodestar_benchmark.exe
+```
+
+The first profile produces 993 triangles. Use `--target-triangles 883 --max-boundary-deviation 5e-5 --normal-tolerance 5e-4 --plane-relative-tolerance 1e-4` for the wider profile, which produces 882. The two candidates preserve all 13 measured silhouettes, the measured clearances through both openings, the wall contact, and the floor height. Maximum sampled surface errors are 4.19 × 10⁻⁹ and 6.81 × 10⁻⁶ relative to the source extent. The wider profile moved a boundary by at most 43.2 µm in the planner.
+
+Bake the 993 profile into a separate directory for the textured comparison.
+
+```powershell
+py -B tools/bake_section_atlas.py $source $textures build/testhall-target-993-replace --library $library `
+    --cross-uv --target-triangles 993 --max-boundary-deviation 1e-7 `
+    --crop-repeats --texel-scale 0.10 --max-tile 256 --retire-material 0
+```
+
+The original image bound to material 0 is replaced by the atlas. In the wider profile, geometry edits already include all of that material's faces. The `--crop-repeats` option also writes `source-cropped.glb`, so both variants can be measured against the same base-level texture crop. Cropping preserves the bilinear taps used by retained faces. Another option, `--reuse-texels`, places every bake tile inside unused texels. The 993 profile fits all 37 tiles with `--crop-repeats --reuse-texels --texel-scale 0.10 --max-tile 128`.
+
+```powershell
+py -m pip install --target build/render-benchmark-wgpu --only-binary=:all: wgpu==0.33.0
+$env:PYTHONPATH = (Resolve-Path 'build/render-benchmark-wgpu').Path
+py -B tools/benchmark_textured_render.py build/testhall-target-993-replace/source-cropped.glb `
+    build/testhall-target-993-replace/lod.glb --resolution 512 `
+    --output build/testhall-target-993-replace/render-cropped-512.json
+```
+
+On an NVIDIA RTX 5070 Ti, the 993-triangle replacement lowered paired GPU time by 4.1% at 512 × 512 and 6.1% at 1024 × 1024 against the cropped source. The 882-triangle replacement lowered it by 11.6% and 13.1%. Estimated RGBA8 base texture storage went from 5.61 MiB to 5.46 and 5.10 MiB. Mean color error on edited pixels was 7.19 and 7.82 out of 255 under the shared diffuse light. The 993-triangle reuse result held storage at 5.61 MiB and lowered edited-pixel mean error to 5.53. Its GPU timing difference was within the uncertainty against the cropped source. These GPU timestamps cover prerecorded offscreen clears and draws. Second Life render performance remains unmeasured.
+
+Applying the wider profile to each supported TestHall section reduced the whole asset from 8,602 to 7,336 triangles, 2,567 above the authored medium LOD. All 13 geometry silhouettes matched. The four gates stayed at 4,560 triangles combined, compared with 2,265 in the authored medium. The remaining unsupported `Wing2` import retained its 218 triangles.
+
+### Reproduce the TestHall CPU baseline
+
+Build Release as above and fetch the fixture files with `tools/fetch_benchmark_assets.py`. Install the CPU tool dependencies in a local environment. The regression runner uses the native tools without opening a window or timing a GPU.
+
+```powershell
+py -m venv build/cpu-python
+$python = 'build/cpu-python/Scripts/python.exe'
+& $python -m pip install -r tools/requirements-cpu.txt
+$native = 'build/Release'
+& $python -B tools/check_testhall_regressions.py $corpus build/testhall-regressions `
+    --library "$native/lodestar_c.dll" --lodestar "$native/inverseglod.exe" `
+    --benchmark "$native/lodestar_benchmark.exe"
+```
+
+This checks the 993- and 882-triangle Wing2Break variants, the authored physics repair, and the 7,336-triangle full-scene result against the 4,769-triangle reference. Add `--textures $textures` to check the Wing2Break diffuse bakes. The full-scene command is `tools/check_testhall_full.py`. The regression exits with an error on a baseline mismatch and writes `scorecard.json` on success.
+
+### TestHall nonplanar gate trial
+
+The gate pass proposes meshoptimizer reductions on geometric components. It retains each component's manifold topology, boundary-loop count, and pinned contacts. The CPU check compares reimported geometry with the aligned authored medium LOD before baking. A candidate must match or improve the authored surface and silhouette measurements and leave source-clear pixels with a three-pixel margin open in the gate's front projection. The bake projects diffuse color from the same component and checks mean and 95th-percentile color error against the authored reference.
+
+```powershell
+& $python -B tools/check_testhall_gates.py $corpus build/testhall-gates `
+    --library "$native/lodestar_c.dll" --benchmark "$native/lodestar_benchmark.exe" `
+    --lodestar "$native/inverseglod.exe" --holdout (Join-Path $corpus 'BarramundiFish.glb') `
+    --textures $textures --atlas-only --max-tile 12 --supersamples 2 --screen-components `
+    --relative-error 0.002 0.005 0.01 0.025
+```
+
+Use `--gate gate` for a single-gate pilot. The full run writes the part reports, a combined textured gate comparison, a geometry-only full-scene comparison, and a source-derived collider. The isolated GPU benchmark can use the exported `source.glb`, `lod.glb` and `authored.glb` for a gate or `combined-gates`, using the same `tools/benchmark_textured_render.py` command shown above.
+
+| Trial | Source triangles | Candidate triangles | Authored target |
+| --- | ---: | ---: | ---: |
+| `gate` | 1,140 | 651 | 651 |
+| `gate1` | 1,140 | 686 | 538 |
+| `gate2` | 1,140 | 686 | 538 |
+| `gate3` | 1,140 | 656 | 538 |
+| Full TestHall | 8,602 | 5,455 | 4,769 |
+
+All four gate candidates passed the measured surface, silhouette, opening, and diffuse color checks. The full-scene geometry comparison had a worst silhouette IoU error of 0.105%, compared with 0.645% for the authored LOD. Barramundi Fish went from 3,864 to 1,924 triangles in the geometry holdout, with a worst silhouette IoU error of 0.675%. Its textured PBR appearance remains unmeasured.
+
+Combined gate mean RGB error was 4.07 of 255, compared with 8.86 for the authored gates under the same diffuse light. The original gates share one 1.00 MiB image. Their four baked images total 2.26 MiB in base-level RGBA8. At 512 × 512 the combined candidate used 1.6% less GPU time than the source and 11.6% more than the authored LOD in matched offscreen timing on an RTX 5070 Ti.
+
+A single authored mesh supplies the visual source and its collider. The viewer builds the collider from the original triangles and keeps it fixed as visual LODs change. The CPU collision fixture checks doorway clearance, floor support, and tread and riser contacts on a four-step staircase. The gate trial also checks that the exported source collider round-trips with the original positions and winding. Avatar step handling and Second Life traversal still require runtime validation.
+
 ### Matched sphere controls
 
 The controls are the built-in sphere and an independent CC0 icosphere by The People's Internet. The fetch helper copies the published icosphere's original triangle positions and winding into indexed COLLADA with no UVs. [Icosphere source and license](https://commons.wikimedia.org/wiki/File:Sphere_(Icosphere).stl)
@@ -178,6 +364,8 @@ Call `lodestar::inspectTopology(mesh)` to compare indexed edges with exact endpo
 
 Call `lodestar::inspectBoundaryBudget(mesh)` to check the current indexed charts, including material and surface boundaries. The diagnostic keeps split indices in place even if the input supplies authored position IDs.
 
+Call `lodestar::buildCollisionMesh(mesh)` with an imported or caller-owned indexed triangle mesh. It returns owned positions and indices in the supplied coordinate space and reports skipped zero-area triangles.
+
 ### Rust
 
 Build the shared C ABI with `cmake --build build --target lodestar_c --config Release`. Add the crate as a local path dependency in your `Cargo.toml`.
@@ -211,6 +399,8 @@ fn main() -> Result<(), lodestar::Error> {
 For aligned imports, call `Asset::load_in_space()` with `ImportSpace::Scene`. `Asset::inspect_topology()` reports edge and seam counts, and `Asset::inspect_boundary_budget()` reports the fixed-boundary triangle bound. To supply an authored mesh, pass borrowed `vertices` and `indices` to `Asset::from_mesh(MeshInput { … })` with `vertex_position_ids`, `triangle_surface_ids`, and `triangle_materials` where available. Use `..MeshInput::default()` for omitted fields. Set the UV flags to match the input and set `has_unrepresented_vertex_attributes` if its source carries other per-vertex data. Zero position IDs mean unknown. Generated meshes expose the retained IDs through `Mesh::vertex_position_ids()`, `Mesh::triangle_surface_ids()`, and `Mesh::triangle_materials()`.
 
 `Mode::Planar` and `Mode::Seam` use quality levels. `Asset::generate_planar()` and `Asset::generate_seam()` each take a triangle budget and reuse their prepared analysis on subsequent calls.
+
+Call `Asset::generate_collision()` on a loaded asset or one created with `Asset::from_mesh()`. Its `CollisionMesh` owns the collider and exposes read-only position and index slices. The C ABI equivalents are `lodestar_asset_generate_collision()` and `lodestar_collision_mesh_get_view()`.
 
 The C ABI exposes in-memory mesh creation through `lodestar_asset_analyze_mesh()`, topology and budget inspection through `lodestar_asset_inspect_topology()` and `lodestar_asset_inspect_boundary_budget()`, and generated mesh IDs through `lodestar_mesh_get_provenance()`. Use `lodestar_asset_generate_seam()` to generate a seam mesh at an explicit triangle budget. [C header](include/lodestar/lodestar_c.h)
 

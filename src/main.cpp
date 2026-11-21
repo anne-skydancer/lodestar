@@ -1,3 +1,4 @@
+#include "collision_collada.hpp"
 #include "renderer.hpp"
 
 #include <lodestar/lodestar.hpp>
@@ -29,6 +30,7 @@ constexpr int defaultQuality = 4;
 
 struct Options {
     std::optional<std::string> path;
+    std::optional<std::string> physicsPath;
     int quality = defaultQuality;
     bool inspect = false;
     bool help = false;
@@ -45,6 +47,11 @@ Options parseOptions(const std::vector<std::string>& args) {
             options.help = true;
         } else if (readFlags && arg == "--inspect") {
             options.inspect = true;
+        } else if (readFlags && arg == "--export-physics") {
+            if (options.physicsPath || ++i == args.size() || args[i].empty() || args[i].starts_with('-')) {
+                throw std::invalid_argument("--export-physics requires one output path");
+            }
+            options.physicsPath = args[i];
         } else if (readFlags && arg == "--quality") {
             if (++i == args.size()) throw std::invalid_argument("--quality requires a number from 1 to 12");
             const auto& value = args[i];
@@ -78,6 +85,30 @@ std::string_view eligibilityDescription(SphereEligibility status) {
 
 void printStats(std::string_view name, const Mesh& mesh) {
     std::cout << name << ": " << mesh.indices.size() / 3 << " triangles, " << mesh.vertices.size() << " vertices\n";
+}
+
+void printCollisionStats(const CollisionMesh& collision) {
+    std::cout << "Physics mesh: " << collision.indices.size() / 3 << " triangles, "
+              << collision.positions.size() << " vertices";
+    if (collision.skippedDegenerateTriangles) {
+        std::cout << " | skipped " << collision.skippedDegenerateTriangles << " zero-area triangles";
+    }
+    std::cout << '\n';
+}
+
+void exportPhysics(const Options& options) {
+    if (!options.path || options.inspect) {
+        throw std::invalid_argument("Use --export-physics with an input mesh and without --inspect");
+    }
+    const auto input = std::filesystem::u8path(*options.path);
+    const auto output = std::filesystem::u8path(*options.physicsPath);
+    if (std::filesystem::exists(output) && std::filesystem::equivalent(input, output)) {
+        throw std::invalid_argument("The physics output path would overwrite the input mesh");
+    }
+    const auto collision = buildCollisionMesh(loadMesh(*options.path, ImportSpace::Scene));
+    writeCollisionCollada(collision, output);
+    printCollisionStats(collision);
+    std::cout << "Wrote " << *options.physicsPath << '\n';
 }
 
 double millisecondsSince(Clock::time_point start) {
@@ -127,6 +158,9 @@ void inspect(const Options& options) {
     const auto importStart = Clock::now();
     const auto asset = options.path ? loadAsset(*options.path) : sampleAsset();
     const double importTime = millisecondsSince(importStart);
+    const auto collisionStart = Clock::now();
+    const auto collision = buildCollisionMesh(asset.original);
+    const double collisionTime = millisecondsSince(collisionStart);
     const auto baselineStart = Clock::now();
     const auto baseline = generateMesh(asset, Mode::Baseline, options.quality);
     const double baselineTime = millisecondsSince(baselineStart);
@@ -148,6 +182,7 @@ void inspect(const Options& options) {
     std::cout << "Quality: " << options.quality << " / " << maximumQuality << '\n';
     std::cout << "Source UVs: " << (asset.original.hasUV ? "present" : "none") << '\n';
     printStats("Original", asset.original);
+    printCollisionStats(collision);
     printTopology(inspectTopology(asset.original));
     printStats("Baseline", baseline);
     printStats("Planar", planarMesh);
@@ -183,6 +218,7 @@ void inspect(const Options& options) {
     }
     std::cout << std::fixed << std::setprecision(3)
               << (options.path ? "Import and analysis: " : "Sample and analysis: ") << importTime << " ms\n"
+              << "Physics mesh generation: " << collisionTime << " ms\n"
               << "Baseline generation: " << baselineTime << " ms\n"
               << "Planar analysis: " << planarAnalysisTime << " ms\n"
               << "Planar generation: " << planarGenerationTime << " ms\n"
@@ -190,10 +226,37 @@ void inspect(const Options& options) {
               << "Seam generation: " << seamGenerationTime << " ms\n";
 }
 
+Mesh collisionPreview(const CollisionMesh& collision) {
+    if (collision.indices.empty()) throw std::runtime_error("The physics mesh contains no triangles");
+    Mesh mesh;
+    mesh.vertices.reserve(collision.positions.size());
+    mesh.indices = collision.indices;
+    for (const auto& position : collision.positions) {
+        mesh.vertices.push_back({{position[0], position[1], position[2]}, glm::vec3(0.0f), glm::vec2(0.0f)});
+    }
+    for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+        auto& a = mesh.vertices[mesh.indices[i]];
+        auto& b = mesh.vertices[mesh.indices[i + 1]];
+        auto& c = mesh.vertices[mesh.indices[i + 2]];
+        const auto ab = glm::dvec3(b.position) - glm::dvec3(a.position);
+        const auto ac = glm::dvec3(c.position) - glm::dvec3(a.position);
+        const glm::vec3 normal(glm::normalize(glm::cross(ab, ac)));
+        a.normal += normal;
+        b.normal += normal;
+        c.normal += normal;
+    }
+    for (auto& vertex : mesh.vertices) {
+        vertex.normal = glm::dot(vertex.normal, vertex.normal) > 0.0f
+            ? glm::normalize(vertex.normal) : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    return mesh;
+}
+
 class Viewer {
 public:
     Viewer(GLFWwindow* window, Asset asset, int quality)
-        : window_(window), asset_(std::move(asset)), quality_(quality), pendingQuality_(quality) {
+        : window_(window), asset_(std::move(asset)), collision_(buildCollisionMesh(asset_.original)),
+          quality_(quality), pendingQuality_(quality) {
         glfwSetWindowUserPointer(window_, this);
         glfwSetKeyCallback(window_, onKey);
         glfwSetDropCallback(window_, onDrop);
@@ -232,6 +295,7 @@ private:
     static void onKey(GLFWwindow* window, int key, int, int action, int) {
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         auto& viewer = *static_cast<Viewer*>(glfwGetWindowUserPointer(window));
+        if (key >= GLFW_KEY_1 && key <= GLFW_KEY_6) viewer.pendingCollision_ = key == GLFW_KEY_6;
         switch (key) {
         case GLFW_KEY_ESCAPE: glfwSetWindowShouldClose(window, GLFW_TRUE); break;
         case GLFW_KEY_1: viewer.pendingMode_ = Mode::Original; break;
@@ -264,11 +328,14 @@ private:
             const auto path = std::exchange(pendingPath_, {});
             try {
                 auto next = loadAsset(path);
+                auto collision = buildCollisionMesh(next.original);
                 setMesh(next.original);
                 asset_ = std::move(next);
+                collision_ = std::move(collision);
                 planar_.reset();
                 seam_.reset();
                 mode_ = pendingMode_ = renderedMode_ = Mode::Original;
+                showingCollision_ = pendingCollision_ = false;
                 failedLoad_ = false;
             } catch (const std::exception& error) {
                 failedLoad_ = true;
@@ -276,12 +343,15 @@ private:
             }
             showStatus();
         }
-        if (mode_ == pendingMode_ && quality_ == pendingQuality_) return;
+        if (mode_ == pendingMode_ && quality_ == pendingQuality_ && showingCollision_ == pendingCollision_) return;
 
         try {
             const auto nextMode = pendingMode_ == Mode::Sphere && asset_.eligibility != SphereEligibility::Eligible
                 ? Mode::Original : pendingMode_;
-            if (nextMode != renderedMode_ || (nextMode != Mode::Original && quality_ != pendingQuality_)) {
+            if (pendingCollision_) {
+                if (!showingCollision_) setMesh(collisionPreview(collision_));
+            } else if (showingCollision_ || nextMode != renderedMode_ ||
+                       (nextMode != Mode::Original && quality_ != pendingQuality_)) {
                 if (nextMode == Mode::Original) {
                     setMesh(asset_.original);
                 } else if (nextMode == Mode::Planar || nextMode == Mode::Seam) {
@@ -300,6 +370,7 @@ private:
                     setMesh(generateMesh(asset_, nextMode, pendingQuality_));
                 }
             }
+            showingCollision_ = pendingCollision_;
             renderedMode_ = nextMode;
             mode_ = pendingMode_;
             quality_ = pendingQuality_;
@@ -308,6 +379,7 @@ private:
             std::cerr << "Could not update mesh: " << error.what() << '\n';
             pendingMode_ = mode_;
             pendingQuality_ = quality_;
+            pendingCollision_ = showingCollision_;
         }
     }
 
@@ -321,7 +393,9 @@ private:
         std::ostringstream title;
         title << "Lodestar | ";
         if (failedLoad_) title << "Import failed | ";
-        if (mode_ == Mode::Baseline) {
+        if (showingCollision_) {
+            title << "Physics mesh";
+        } else if (mode_ == Mode::Baseline) {
             title << "Baseline";
         } else if (mode_ == Mode::Planar) {
             title << "Planar";
@@ -334,14 +408,17 @@ private:
             if (mode_ == Mode::Sphere) title << " (sphere unavailable)";
         }
         title << " | " << triangleCount_ << '/' << asset_.original.indices.size() / 3 << " triangles"
-              << " | " << vertexCount_ << " vertices | Q " << quality_ << '/' << maximumQuality;
-        if (asset_.fit.valid) {
+              << " | " << vertexCount_ << " vertices";
+        if (!showingCollision_) {
+            title << " | physics " << collision_.indices.size() / 3 << " tris | Q " << quality_ << '/' << maximumQuality;
+        }
+        if (!showingCollision_ && asset_.fit.valid) {
             title << std::fixed << std::setprecision(3) << " | sphere RMS "
                   << 100.0 * asset_.fit.rmsRelativeError << '%';
         }
         glfwSetWindowTitle(window_, title.str().c_str());
         std::cout << title.str() << std::endl;
-        if (mode_ == Mode::Sphere && renderedMode_ == Mode::Original) {
+        if (!showingCollision_ && mode_ == Mode::Sphere && renderedMode_ == Mode::Original) {
             std::cout << "Keeping the source mesh: " << eligibilityDescription(asset_.eligibility) << std::endl;
         }
     }
@@ -349,6 +426,7 @@ private:
     GLFWwindow* window_;
     Renderer renderer_;
     Asset asset_;
+    CollisionMesh collision_;
     std::optional<PlanarAnalysis> planar_;
     std::optional<SeamAnalysis> seam_;
     size_t vertexCount_{};
@@ -358,6 +436,8 @@ private:
     Mode renderedMode_ = Mode::Original;
     int quality_;
     int pendingQuality_;
+    bool showingCollision_ = false;
+    bool pendingCollision_ = false;
     bool failedLoad_ = false;
     float yaw_ = 0.45f;
     float pitch_ = -0.2f;
@@ -380,7 +460,7 @@ void view(const Options& options) {
         glfwCreateWindow(1120, 760, "Lodestar", nullptr, nullptr), glfwDestroyWindow);
     if (!window) throw std::runtime_error("Could not open the Lodestar window");
 
-    std::cout << "Drop a model to import | 1 original, 2 baseline, 3 sphere, 4 planar, 5 seam | Up/Down quality\n"
+    std::cout << "Drop a model to import | 1 original, 2 baseline, 3 sphere, 4 planar, 5 seam, 6 physics | Up/Down quality\n"
               << "Left/Right and W/S orbit | Page Up/Down zoom | Esc exits\n";
     Viewer viewer(window.get(), std::move(asset), options.quality);
     viewer.run();
@@ -391,8 +471,11 @@ int run(const std::vector<std::string>& args) {
         const auto options = parseOptions(args);
         if (options.help) {
             std::cout << "Usage: inverseglod [--inspect] [--quality 1-12] [mesh.dae|mesh.gltf|mesh.glb]\n"
+                      << "       inverseglod --export-physics collision.dae mesh.dae|mesh.gltf|mesh.glb\n"
                       << "Without a mesh path, Lodestar uses a built-in sphere.\n"
                       << "--inspect compares representations and reports the fixed-boundary budget, fit error, and CPU timings.\n";
+        } else if (options.physicsPath) {
+            exportPhysics(options);
         } else if (options.inspect) {
             inspect(options);
         } else {

@@ -25,6 +25,7 @@ FetchContent_MakeAvailable(assimp glm meshoptimizer)
 
 add_library(lodestar_core STATIC
     src/boundary_budget.cpp
+    src/collision.cpp
     src/geometry.cpp
     src/lodestar.cpp
     src/planar.cpp
@@ -85,7 +86,7 @@ inline constexpr auto fragment = std::to_array<std::uint32_t>(
         list(APPEND shader_outputs "${output}")
     endforeach()
 
-    add_executable(inverseglod src/main.cpp src/renderer.cpp ${shader_outputs})
+    add_executable(inverseglod src/collision_collada.cpp src/main.cpp src/renderer.cpp ${shader_outputs})
     set_target_properties(inverseglod PROPERTIES CXX_EXTENSIONS OFF)
     target_include_directories(inverseglod PRIVATE "${shader_directory}")
     target_link_libraries(inverseglod PRIVATE Lodestar::core Vulkan::Vulkan glfw)
@@ -107,6 +108,10 @@ if(PROJECT_IS_TOP_LEVEL)
         target_link_libraries(lodestar_core_test PRIVATE Lodestar::core)
         add_test(NAME lodestar_core COMMAND lodestar_core_test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/planar-scene.dae")
+
+        add_executable(lodestar_collision_test tests/collision.cpp)
+        target_link_libraries(lodestar_collision_test PRIVATE Lodestar::core)
+        add_test(NAME lodestar_collision COMMAND lodestar_collision_test)
 
         add_executable(lodestar_planar_test tests/planar.cpp)
         target_link_libraries(lodestar_planar_test PRIVATE Lodestar::core)

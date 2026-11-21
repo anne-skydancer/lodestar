@@ -214,6 +214,39 @@ impl Mesh {
     }
 }
 
+/// Owned positions and triangle indices for static collision queries.
+#[derive(Debug)]
+pub struct CollisionMesh {
+    _handle: CollisionMeshHandle,
+    view: NativeCollisionMeshView,
+}
+
+impl CollisionMesh {
+    pub fn positions(&self) -> &[[f32; 3]] {
+        if self.view.position_count == 0 {
+            return &[];
+        }
+        // The collider owns the immutable XYZ triplets for the lifetime of this view.
+        unsafe { slice::from_raw_parts(self.view.positions, self.view.position_count) }
+    }
+
+    pub fn indices(&self) -> &[u32] {
+        if self.view.index_count == 0 {
+            return &[];
+        }
+        // The collider owns this immutable index buffer.
+        unsafe { slice::from_raw_parts(self.view.indices, self.view.index_count) }
+    }
+
+    pub fn triangle_count(&self) -> usize {
+        self.view.index_count / 3
+    }
+
+    pub fn skipped_degenerate_triangles(&self) -> usize {
+        self.view.skipped_degenerate_triangles
+    }
+}
+
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -332,6 +365,23 @@ impl Asset {
         })
     }
 
+    /// Build a static collider in the source coordinate space, independent of visual LOD.
+    pub fn generate_collision(&self) -> Result<CollisionMesh, Error> {
+        let mut handle = ptr::null_mut();
+        check(unsafe { lodestar_asset_generate_collision(self.handle.0.as_ptr(), &mut handle) })?;
+        let handle = CollisionMeshHandle(
+            NonNull::new(handle)
+                .ok_or_else(|| Error("Native collision mesh handle is missing".to_owned()))?,
+        );
+        let mut view = MaybeUninit::uninit();
+        check(unsafe { lodestar_collision_mesh_get_view(handle.0.as_ptr(), view.as_mut_ptr()) })?;
+        // The view is initialized on success and borrows the returned handle's buffers.
+        Ok(CollisionMesh {
+            _handle: handle,
+            view: unsafe { view.assume_init() },
+        })
+    }
+
     fn generate_using(
         &self,
         generate: impl FnOnce(*const NativeAsset, *mut *mut NativeMesh) -> u32,
@@ -422,6 +472,15 @@ impl Drop for MeshHandle {
     }
 }
 
+#[derive(Debug)]
+struct CollisionMeshHandle(NonNull<NativeCollisionMesh>);
+
+impl Drop for CollisionMeshHandle {
+    fn drop(&mut self) {
+        unsafe { lodestar_collision_mesh_destroy(self.0.as_ptr()) };
+    }
+}
+
 #[repr(C)]
 struct NativeAsset {
     _opaque: [u8; 0],
@@ -429,6 +488,11 @@ struct NativeAsset {
 
 #[repr(C)]
 struct NativeMesh {
+    _opaque: [u8; 0],
+}
+
+#[repr(C)]
+struct NativeCollisionMesh {
     _opaque: [u8; 0],
 }
 
@@ -454,6 +518,16 @@ struct NativeMeshView {
     indices: *const u32,
     index_count: usize,
     has_uv: u32,
+}
+
+#[repr(C)]
+#[derive(Debug)]
+struct NativeCollisionMeshView {
+    positions: *const [f32; 3],
+    position_count: usize,
+    indices: *const u32,
+    index_count: usize,
+    skipped_degenerate_triangles: usize,
 }
 
 #[repr(C)]
@@ -519,6 +593,15 @@ extern "C" {
         target_triangles: usize,
         result: *mut *mut NativeMesh,
     ) -> u32;
+    fn lodestar_asset_generate_collision(
+        asset: *const NativeAsset,
+        result: *mut *mut NativeCollisionMesh,
+    ) -> u32;
+    fn lodestar_collision_mesh_get_view(
+        mesh: *const NativeCollisionMesh,
+        result: *mut NativeCollisionMeshView,
+    ) -> u32;
+    fn lodestar_collision_mesh_destroy(mesh: *mut NativeCollisionMesh);
     fn lodestar_mesh_get_view(mesh: *const NativeMesh, result: *mut NativeMeshView) -> u32;
     fn lodestar_mesh_get_metadata(mesh: *const NativeMesh, result: *mut NativeMeshMetadata) -> u32;
     fn lodestar_mesh_get_provenance(
@@ -608,6 +691,29 @@ mod tests {
         assert!(planar.vertices().iter().all(|vertex| {
             (5.0..=11.0).contains(&vertex.position[0]) && vertex.position[2] == 3.0
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn collision_preserves_source_geometry_through_visual_lod() -> Result<(), Error> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/assets/planar-scene.dae");
+        let asset = Asset::load_in_space(path, ImportSpace::Scene)?;
+        let original = asset.generate(Mode::Original, 12)?;
+        let collision = asset.generate_collision()?;
+        assert_eq!(asset.generate_planar(4)?.triangle_count(), 4);
+        drop(asset);
+
+        assert_eq!(collision.triangle_count(), 8);
+        assert_eq!(collision.skipped_degenerate_triangles(), 0);
+        for (&collider_index, &source_index) in collision.indices().iter().zip(original.indices()) {
+            let position = collision.positions()[collider_index as usize];
+            assert_eq!(
+                position,
+                original.vertices()[source_index as usize].position
+            );
+            assert!((5.0..=11.0).contains(&position[0]));
+            assert_eq!(position[2], 3.0);
+        }
         Ok(())
     }
 
