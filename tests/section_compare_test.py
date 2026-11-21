@@ -72,6 +72,19 @@ class SectionCompareTest(unittest.TestCase):
         self.assertEqual(result.metrics["edited_pixels"], result.metrics["compared_pixels"])
         self.assertLess(result.metrics["edited_pixels"], result.metrics["source_pixels"])
 
+    def test_explicit_frame_preserves_source_projection_across_comparisons(self):
+        positions, uv, normals = quad()
+        displaced = positions + [0.6, 0, 0]
+        textures = {0: (Image.new("RGB", (1, 1), "white"), True)}
+        source = positions, uv, normals, [0, 0], textures
+        frame = np.concatenate((positions, displaced))
+        original = compare_section(*source, *source, resolution=64, frame_positions=frame).metrics
+        changed = compare_section(*source, displaced, *source[1:], resolution=64, frame_positions=frame).metrics
+        self.assertEqual([view["source_pixels"] for view in original["views"]],
+                         [view["source_pixels"] for view in changed["views"]])
+        self.assertEqual(original["silhouette_iou"], 1)
+        self.assertLess(changed["silhouette_iou"], 1)
+
     def test_edited_pixel_errors_are_measured_on_the_union_of_visible_face_masks(self):
         positions, uv, normals = quad()
         panels = np.concatenate((positions - [1.5, 0, 0], positions + [1.5, 0, 0]))

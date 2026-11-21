@@ -167,9 +167,40 @@ def _exact_lookup(triangles, components):
     return matches
 
 
+_UV_REUSE_LATTICE = np.array([(a, b, 9 - a - b) for a in range(10) for b in range(10 - a)]) / 9
+_UV_REUSE_CENTER = int(np.argmin(np.sum((_UV_REUSE_LATTICE - 1 / 3) ** 2, axis=1)))
+_UV_REUSE_TEXEL_TOLERANCE = 0.3
+
+
+def _affine_uv_reuse(surface, triangle, neighbors, maximum_distance):
+    """Reuse an original image when one UV field agrees throughout sampled points."""
+    points = _UV_REUSE_LATTICE @ triangle
+    try:
+        faces, weights, distances = surface.project(points, neighbors, maximum_distance)
+    except ValueError:
+        return None
+    anchor = faces[_UV_REUSE_CENTER]
+    material = int(surface.materials[anchor])
+    if np.any(surface.materials[faces] != material):
+        return None
+    image, repeat = surface.textures[material]
+    texels = np.array(image.shape[1::-1], dtype=np.float64)
+    # The projected affine field extends past the anchor triangle's edges.
+    # Compare it against the actual nearest-face UVs, including other charts.
+    offset = triangle - surface.triangles[anchor, 0]
+    uv = surface.uvs[anchor, 0] + offset @ (surface.gradient[anchor] / texels)
+    uv = uv.astype("<f4").astype(np.float64)
+    actual = np.einsum("ij,ijk->ik", weights, surface.uvs[faces])
+    delta = _UV_REUSE_LATTICE @ uv - actual
+    if repeat:
+        delta -= np.rint(delta)
+    error = float(np.max(np.abs(delta * texels)))
+    return (uv, material, error, distances) if error <= _UV_REUSE_TEXEL_TOLERANCE else None
+
+
 def bake_nonplanar(section, candidate_positions, textures, *, max_projection_distance,
                    texel_scale=0.5, max_tile=64, max_atlas=2048, supersamples=1,
-                   source_components=None, target_components=None, retain_exact=True):
+                   source_components=None, target_components=None, retain_exact=True, reuse_affine_uv=False):
     """Return top-origin UVs, normals, face material IDs, textures and metrics.
 
     Candidate triangle corners stay in their original order and positions.
@@ -177,6 +208,8 @@ def bake_nonplanar(section, candidate_positions, textures, *, max_projection_dis
     source-facing proximity for diffuse projection and entirely padded tiles.
     Provide matching per-face component IDs to isolate neighboring shells.
     Use retain_exact=False for an atlas covering the entire candidate.
+    With reuse_affine_uv=True, sampled material and UV agreement can retain
+    the original texture even on a changed face.
     An unsupported or over-distance projection raises before any file export.
     """
     source = np.asarray(section.positions, dtype=np.float64)
@@ -217,6 +250,8 @@ def bake_nonplanar(section, candidate_positions, textures, *, max_projection_dis
     output_materials = np.full(len(candidate), atlas_id, dtype=np.int64)
     tiles = []
     retained = 0
+    affine_retained = 0
+    affine_error = 0.0
     distance_max = 0.0
     distance_sum = 0.0
     sample_count = 0
@@ -242,6 +277,18 @@ def bake_nonplanar(section, candidate_positions, textures, *, max_projection_dis
             distance_max = max(distance_max, float(distances.max()))
             distance_sum += distances.sum()
             sample_count += 3
+            reused = (_affine_uv_reuse(surface, triangle, neighbors, max_projection_distance)
+                      if reuse_affine_uv else None)
+            if reused is not None:
+                uv, material, error, distances = reused
+                output_uv[face] = uv
+                output_materials[face] = material
+                affine_retained += 1
+                affine_error = max(affine_error, error)
+                distance_max = max(distance_max, float(distances.max()))
+                distance_sum += distances.sum()
+                sample_count += len(distances)
+                continue
             tile, maximum, total, count = _tile(surface, face, triangle, normal, neighbors, max_projection_distance,
                                                texel_scale, max_tile, supersamples)
         except ValueError as error:
@@ -262,6 +309,8 @@ def bake_nonplanar(section, candidate_positions, textures, *, max_projection_dis
         atlas_size = list(atlas.size)
     report = {
         "retained_faces": retained,
+        "affine_uv_faces": affine_retained,
+        "maximum_affine_uv_error_texels": affine_error,
         "baked_faces": len(tiles),
         "projection_samples": sample_count,
         "maximum_projection_distance": distance_max,

@@ -81,6 +81,42 @@ class NonplanarBakeTest(unittest.TestCase):
         self.assertEqual(set(output), {4})
         self.assertEqual(report["baked_faces"], 1)
 
+    def test_affine_uv_reuse_keeps_the_original_repeating_texture(self):
+        high = section([[[0, 0, 0], [2, 0, 0], [2, 1, 0]],
+                        [[0, 0, 0], [2, 1, 0], [0, 1, 0]]], [3, 3])
+        low = np.array([[[0, 0, 0], [2, 0, 0], [0, 1, 0]],
+                        [[2, 0, 0], [2, 1, 0], [0, 1, 0]]])
+        high.source_uvs *= [0.3, 0.4]
+        high.source_uvs[1] += [3, -2]
+        image = Image.new("RGB", (512, 512), "red")
+        textures = {3: (image, True)}
+        uv, _, labels, output, report = bake_nonplanar(high, low, textures, max_projection_distance=.001,
+                                                       reuse_affine_uv=True)
+        delta = uv - (low[:, :, :2] * [.3, -.4] + [0, 1])
+        np.testing.assert_allclose(delta - np.rint(delta), 0, atol=1e-6)
+        self.assertEqual(labels.tolist(), [3, 3])
+        self.assertIs(output[3][0], image)
+        self.assertEqual(report["affine_uv_faces"], 2)
+        self.assertIsNone(report["atlas_size"])
+
+        _, _, labels, _, report = bake_nonplanar(high, low, {3: (image, False)},
+                                                max_projection_distance=.001, reuse_affine_uv=True)
+        self.assertEqual(labels.tolist(), [4, 4])
+        self.assertEqual(report["affine_uv_faces"], 0)
+        self.assertEqual(report["baked_faces"], 2)
+
+    def test_affine_uv_reuse_falls_back_when_a_candidate_spans_materials(self):
+        high = section([[[0, 0, 0], [2, 0, 0], [2, 1, 0]],
+                        [[0, 0, 0], [2, 1, 0], [0, 1, 0]]], [3, 4])
+        low = np.array([[[0, 0, 0], [2, 0, 0], [0, 1, 0]]])
+        textures = {3: (Image.new("RGB", (8, 8), "red"), True),
+                    4: (Image.new("RGB", (8, 8), "blue"), True)}
+        _, _, labels, _, report = bake_nonplanar(high, low, textures, max_projection_distance=.001,
+                                                reuse_affine_uv=True)
+        self.assertEqual(labels.tolist(), [5])
+        self.assertEqual(report["affine_uv_faces"], 0)
+        self.assertEqual(report["baked_faces"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

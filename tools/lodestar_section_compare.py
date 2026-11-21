@@ -70,7 +70,7 @@ def _section(positions, uvs, normals, materials, textures, image_cache, edited):
     return _Section(positions, uvs, normals, materials, converted, edited)
 
 
-def _project_pair(source, target, direction, resolution):
+def _project_pair(source, target, direction, resolution, frame_positions=None):
     toward_camera = np.asarray(direction, dtype=np.float64)
     toward_camera /= np.linalg.norm(toward_camera)
     reference_up = [0, 1, 0] if abs(toward_camera[1]) < 0.99 else [0, 0, -1]
@@ -82,8 +82,12 @@ def _project_pair(source, target, direction, resolution):
     origin = source[0, 0]
     source = (source - origin) @ basis
     target = (target - origin) @ basis
-    minimum = np.minimum(source.min(axis=(0, 1)), target.min(axis=(0, 1)))[:2]
-    maximum = np.maximum(source.max(axis=(0, 1)), target.max(axis=(0, 1)))[:2]
+    if frame_positions is None:
+        minimum = np.minimum(source.min(axis=(0, 1)), target.min(axis=(0, 1)))[:2]
+        maximum = np.maximum(source.max(axis=(0, 1)), target.max(axis=(0, 1)))[:2]
+    else:
+        frame = (frame_positions - origin) @ basis
+        minimum, maximum = frame.min(axis=(0, 1))[:2], frame.max(axis=(0, 1))[:2]
     extent = (maximum - minimum).max()
     if not np.isfinite(extent):
         raise ValueError("Section exceeds a finite orthographic projection")
@@ -190,7 +194,7 @@ def _silhouette_iou(intersection, union):
 
 def compare_section(source_positions, source_uvs, source_normals, source_materials, source_textures,
                     target_positions, target_uvs, target_normals, target_materials, target_textures,
-                    resolution=512, *, source_edited=None, target_edited=None):
+                    resolution=512, *, source_edited=None, target_edited=None, frame_positions=None):
     """Compare visible diffuse RGB and silhouettes in shared scene coordinates.
 
     Pass per-triangle corner arrays and one integer material ID per triangle.
@@ -199,9 +203,15 @@ def compare_section(source_positions, source_uvs, source_normals, source_materia
     pixels after linear-light shading and conversion to 8-bit sRGB.
     Optional boolean masks mark edited triangles. Edited RGB errors are measured
     where both surfaces are visible and either visible triangle is marked.
+    Pass shared frame positions to give multiple comparisons identical cameras.
     """
     if not isinstance(resolution, (int, np.integer)) or not 16 <= resolution <= 2048:
         raise ValueError("Use a comparison resolution from 16 to 2048 pixels")
+    if frame_positions is not None:
+        frame_positions = np.asarray(frame_positions, dtype=np.float64)
+        if (frame_positions.ndim != 3 or frame_positions.shape[1:] != (3, 3) or
+                not len(frame_positions) or not np.isfinite(frame_positions).all()):
+            raise ValueError("Use finite triangle positions to frame the comparison")
     image_cache = {}
     source = _section(source_positions, source_uvs, source_normals, source_materials, source_textures,
                       image_cache, source_edited)
@@ -220,7 +230,8 @@ def compare_section(source_positions, source_uvs, source_normals, source_materia
     counts = {"source_pixels": 0, "target_pixels": 0, "compared_pixels": 0, "union_pixels": 0}
     views = []
     for i, (name, direction) in enumerate(VIEWS):
-        source_projection, target_projection = _project_pair(source.positions, target.positions, direction, resolution)
+        source_projection, target_projection = _project_pair(source.positions, target.positions, direction, resolution,
+                                                            frame_positions)
         source_mask, source_rgb, source_edits = _render(source, source_projection, resolution)
         target_mask, target_rgb, target_edits = _render(target, target_projection, resolution)
         intersection = source_mask & target_mask

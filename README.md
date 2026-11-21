@@ -319,6 +319,28 @@ Combined gate mean RGB error was 4.07 of 255, compared with 8.86 for the authore
 
 A single authored mesh supplies the visual source and its collider. The viewer builds the collider from the original triangles and keeps it fixed as visual LODs change. The CPU collision fixture checks doorway clearance, floor support, and tread and riser contacts on a four-step staircase. The gate trial also checks that the exported source collider round-trips with the original positions and winding. Avatar step handling and Second Life traversal still require runtime validation.
 
+### Textured TestHall at 4,769 triangles
+
+```powershell
+& $python -B tools/check_testhall_target.py $corpus $textures build/testhall-4769-qualified `
+    --library "$native/lodestar_c.dll" --benchmark "$native/lodestar_benchmark.exe" `
+    --lodestar "$native/inverseglod.exe"
+```
+
+The target runner preserves the four qualified gate results, the original Wing3 façade and textures, and the Hall1 planar LOD. It uses bounded nonplanar reductions in other sections and keeps selected original components to obtain exactly 4,769 triangles. The bake reuses original UVs when samples across a face agree, and puts incompatible texture mappings into atlases. The sharper profile uses 64-pixel caps for nonplanar tiles and 256-pixel caps for planar charts.
+
+At 512 × 512 in the matched diffuse views, the target has mean RGB error of 1.99 out of 255 and a 95th-percentile error of 12. The aligned authored medium LOD has errors of 4.03 and 24. Estimated base-level RGBA8 storage is 23.92 MiB for this profile and 15.00 MiB for the source. `comparison.png` and `authored-comparison.png` show both comparisons with the same framing.
+
+The runner exports `lod.glb`, `lod.gltf`, and `lod.dae`, reimports their textures and geometry, and generates collision from each mesh. Keep the adjacent `.bin` with `lod.gltf` and the `lod-textures` directory with `lod.dae`. The images use PNG. This workflow covers static opaque diffuse meshes with UV0 and matching repeat or clamp modes on both texture axes.
+
+The collision checks replay supported capsule walks through TestHall's doorway and arch routes. The full-resolution `source-collision.dae` derives from the original mesh. A four-tread render mesh supplies the separate stair fixture. Its generated collider supports three 0.17 m rises, and the CPU tests reject an excessive riser, a low lintel, a missing tread, and a gap. The runner records the geometry, appearance, and traversal checks in `scorecard.json`.
+
+#### Second Life upload target
+
+Start with an authored glTF or COLLADA mesh. Generate a matched High, Medium, Low, and Lowest chain and derive collision automatically from the source. Each exported level needs stable object names, transforms, and material slots. Second Life's documented matching uses `_LOD2`, `_LOD1`, `_LOD0`, and `_PHYS` for the accompanying models. Validate those bindings in the target Firestorm uploader. [Second Life upload guide](https://community.secondlife.com/knowledgebase/english/uploading-a-mesh-model-r274/) · [Mesh import tests](https://wiki.secondlife.com/wiki/Mesh_Import_test#Name_based_matching)
+
+The current 4,769-triangle export is a qualified medium-LOD candidate for local evaluation. It combines TestHall's parts into one visual mesh. An uploader package still needs matching per-object levels and material bindings. Its acceptance test should cover the first recognizable shape during loading, the silhouette and visible detail around LOD transitions, the viewer's reported download cost, and walking through doors and up stairs with the derived physics.
+
 ### Matched sphere controls
 
 The controls are the built-in sphere and an independent CC0 icosphere by The People's Internet. The fetch helper copies the published icosphere's original triangle positions and winding into indexed COLLADA with no UVs. [Icosphere source and license](https://commons.wikimedia.org/wiki/File:Sphere_(Icosphere).stl)

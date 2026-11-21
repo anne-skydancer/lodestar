@@ -87,7 +87,7 @@ def read_textures(materials, folder):
                 if image.convert("RGBA").getextrema()[3] != (255, 255):
                     raise ValueError(f"{path.name} needs an opaque diffuse texture")
                 by_file[path] = image.convert("RGB")
-        textures[int(material_id)] = (by_file[path], True)
+        textures[int(material_id)] = (by_file[path], material.repeat)
     return textures
 
 

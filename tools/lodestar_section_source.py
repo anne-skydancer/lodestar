@@ -3,6 +3,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import unquote
 import xml.etree.ElementTree as ET
 
 import numpy as np
@@ -15,6 +16,7 @@ class MaterialSource:
     symbol: str
     material_id: str
     texture_filename: str
+    repeat: bool = True
 
 
 @dataclass(frozen=True)
@@ -137,10 +139,13 @@ def resolve_material(root, binding):
     surface = parameters.get(surface_sid)
     image_id = surface.findtext("./surface/init_from") if surface is not None else None
     image = by_id(root, "./library_images/image", image_id)
-    filename = image.findtext("init_from", "").strip()
-    if not filename or filename in (".", "..") or any(c in filename for c in "/\\:"):
-        raise ValueError(f"Material {material_id!r} must refer to a texture filename")
-    return MaterialSource(symbol, material_id, filename)
+    filename = unquote(image.findtext("init_from", "").strip())
+    if any(part in ("", ".", "..") for part in filename.split("/")) or any(c in filename for c in "\\:\0"):
+        raise ValueError(f"Material {material_id!r} must refer to a relative texture path")
+    wrap = tuple(sampler.findtext(f"./sampler2D/wrap_{axis}", "WRAP").strip() for axis in ("s", "t"))
+    if wrap not in (("WRAP", "WRAP"), ("CLAMP", "CLAMP")):
+        raise ValueError(f"Material {material_id!r} needs matching WRAP or CLAMP texture axes")
+    return MaterialSource(symbol, material_id, filename, wrap[0] == "WRAP")
 
 
 def primitive_corners(mesh, primitive, transform, reverse):
