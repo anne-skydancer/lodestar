@@ -1,6 +1,6 @@
 # Lodestar
 
-Lodestar is a C++20 Vulkan prototype for exploring geometric levels of detail (LOD) on Second Life-style meshes. It compares imported triangles with meshoptimizer, analytic sphere, planar, and exact seam representations. You can compare silhouettes and triangle counts at different quality levels. The original mesh is the default for every asset.
+Lodestar is a C++20 and Rust prototype for exploring geometric levels of detail (LOD) on Second Life-style meshes. It compares imported triangles with meshoptimizer, analytic sphere, planar, and exact seam representations. You can compare silhouettes and triangle counts at different quality levels. The original mesh is the default for every asset.
 
 ## Build and run
 
