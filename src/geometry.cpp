@@ -97,6 +97,11 @@ void appendMesh(const aiMesh& source, const glm::dmat4& transform,
         }
 
         std::array<unsigned, 3> corners{face.mIndices[0], face.mIndices[1], face.mIndices[2]};
+        for (const auto corner : corners) {
+            if (!mesh.declaredSceneBounds) mesh.declaredSceneBounds = std::array{positions[corner], positions[corner]};
+            (*mesh.declaredSceneBounds)[0] = glm::min((*mesh.declaredSceneBounds)[0], positions[corner]);
+            (*mesh.declaredSceneBounds)[1] = glm::max((*mesh.declaredSceneBounds)[1], positions[corner]);
+        }
         if (determinant < 0.0) {
             std::swap(corners[1], corners[2]);
         }
@@ -548,6 +553,34 @@ Mesh simplifyMesh(const Mesh& mesh, float fraction) {
         result.vertices.data(), result.indices.data(), result.indices.size(),
         mesh.vertices.data(), mesh.vertices.size(), sizeof(Vertex));
     result.vertices.resize(vertexCount);
+    return result;
+}
+
+GeometryReduction simplifyGeometry(std::span<const float> positions, std::span<const uint32_t> indices,
+                                   std::span<const uint8_t> lockedVertices, std::size_t targetTriangles,
+                                   float maxError, bool lockBoundary) {
+    const auto vertexCount = positions.size() / 3;
+    if (positions.empty() || positions.size() % 3 != 0 || vertexCount > std::numeric_limits<uint32_t>::max() ||
+        indices.empty() || indices.size() % 3 != 0 ||
+        (!lockedVertices.empty() && lockedVertices.size() != vertexCount) || targetTriangles == 0 ||
+        !std::isfinite(maxError) || maxError < 0.0f ||
+        std::ranges::any_of(positions, [](float value) { return !std::isfinite(value); }) ||
+        std::ranges::any_of(indices, [=](uint32_t index) { return index >= vertexCount; }) ||
+        std::ranges::any_of(lockedVertices, [](uint8_t value) { return value > 1; })) {
+        throw std::invalid_argument("Invalid geometry simplification input");
+    }
+    if (targetTriangles >= indices.size() / 3) {
+        return {{indices.begin(), indices.end()}, 0.0f};
+    }
+    GeometryReduction result;
+    result.indices.resize(indices.size());
+    const auto options = unsigned(meshopt_SimplifyErrorAbsolute) |
+                         (lockBoundary ? unsigned(meshopt_SimplifyLockBorder) : 0u);
+    const auto count = meshopt_simplifyWithAttributes(
+        result.indices.data(), indices.data(), indices.size(), positions.data(), vertexCount, 3 * sizeof(float),
+        nullptr, 0, nullptr, 0, lockedVertices.empty() ? nullptr : lockedVertices.data(), targetTriangles * 3,
+        maxError, options, &result.estimatedError);
+    result.indices.resize(count);
     return result;
 }
 

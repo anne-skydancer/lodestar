@@ -1,11 +1,14 @@
 #pragma once
 
 #include <glm/glm.hpp>
+#include <lodestar/surface_calculus.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -35,7 +38,104 @@ struct Mesh {
     std::vector<uint32_t> triangleSurfaceIds;
     // Includes source color, skin, morph, and tangent data absent from Vertex.
     bool hasUnrepresentedVertexAttributes = false;
+    // Referenced source bounds before zero-area faces are removed, in scene
+    // metres. Legacy bounds carriers can matter even when they draw no surface.
+    std::optional<std::array<glm::dvec3, 2>> declaredSceneBounds;
 };
+
+struct CollisionMesh {
+    std::vector<std::array<float, 3>> positions;
+    std::vector<uint32_t> indices;
+    std::size_t skippedDegenerateTriangles = 0;
+};
+
+struct SurfaceTessellation {
+    Mesh mesh;
+    SurfaceLodBudget budget;
+    double maximumDeviationBound = 0.0;
+    unsigned subdivisionLevel = 0;
+};
+
+// Tessellate one explicitly supplied regular patch. Derivatives provide normals.
+// Integral density proposes the resolution. Bezier control hulls then bound the
+// interpolation error, with an arithmetic allowance and measured float32 rounding.
+// Throws if the requested tolerance cannot be reached within maximumDepth.
+SurfaceTessellation tessellateSurface(const BezierTriangle& patch, double worldUnitsPerPixel,
+                                     double maximumPixelError, unsigned maximumDepth = 8);
+
+// Build static triangle collision in the source coordinate space. Every nondegenerate
+// source triangle keeps its position and winding. Malformed indices or referenced
+// nonfinite positions throw std::invalid_argument.
+CollisionMesh buildCollisionMesh(const Mesh& source);
+
+struct ConvexHullOptions {
+    std::size_t targetVertices = 256;
+    double maxDeviation = 0.0;
+    // Retain the full footprints on the lowest and highest Y planes.
+    bool preserveVerticalSupport = true;
+};
+
+struct ConvexHullResult {
+    CollisionMesh mesh;
+    std::size_t inputVertices = 0;
+    double maxDeviation = 0.0;
+    bool metTarget = false;
+};
+
+// Simplify one closed, outward-wound convex collision solid in its input units.
+// The result uses source positions and stays inside the source. The vertex target
+// is best effort within the deviation limit. Invalid or concave hulls throw
+// std::invalid_argument. Simplify separate collision pieces independently.
+ConvexHullResult simplifyConvexHull(const CollisionMesh& source, const ConvexHullOptions& options = {});
+
+// Construct the outward convex envelope of finite 3D points. Uses input corners
+// and robust orientation predicates; rejects coplanar/collinear inputs. This
+// constructs an envelope, not a certificate of mesh conformity or hole safety.
+CollisionMesh buildConvexHull(std::span<const std::array<float, 3>> points);
+
+struct CoherentCollisionOptions {
+    double maxSurfaceError = 0.0;
+    std::size_t maxHulls = 256;
+};
+
+struct CoherentCollisionResult {
+    std::vector<CollisionMesh> hulls;
+    double surfaceErrorBound = 0.0;
+    bool exactSolidConversion = false;
+};
+
+struct MeshSizePlan {
+    glm::dvec3 visibleMinimum{};
+    glm::dvec3 visibleMaximum{};
+    glm::dvec3 containerMinimum{};
+    glm::dvec3 containerMaximum{};
+    glm::dvec3 center{};
+    glm::dvec3 visibleSize{};
+    glm::dvec3 containerSize{};
+    glm::dvec3 visibleFraction{};
+    bool requiresContainer = false;
+    bool requiresHullPhysics = false;
+};
+
+// Propose a shared visual/container frame without changing source vertices.
+// Container-normalized p = (source p - center) / containerSize; invert that
+// transform to retain authored physical scale. A physics box alone does not
+// change the visual asset's normalization. Limits use input metre coordinates.
+MeshSizePlan planMeshSize(std::span<const std::array<float, 3>> points,
+                         double minimumDimension = 0.01, double trianglePhysicsMinimum = 0.5);
+
+// Construct a source-following compound, including from open surface elements.
+// Every output piece is a closed convex volume. When exact solid conversion
+// is unavailable, surface coverage and free-space halfspaces are checked within
+// maxSurfaceError. That surface cover is not an exact occupied-volume claim.
+CoherentCollisionResult buildCoherentCollisionShape(const CollisionMesh& source,
+    const CoherentCollisionOptions& options);
+
+// Convert supported closed solids to separate convex pieces with the same volume.
+// Supports convex shells and axis-aligned orthogonal concave solids in source space.
+// Throws std::invalid_argument for unsupported geometry and std::length_error when
+// the conversion exceeds the piece budget or the orthogonal geometry work limits.
+std::vector<CollisionMesh> decomposeCollisionHulls(const CollisionMesh& source, std::size_t maxHulls = 256);
 
 struct TopologyReport {
     bool valid = false;
@@ -131,6 +231,15 @@ SphereFit fitSphere(const Mesh& mesh);
 SphereEligibility sphereEligibility(const Mesh& mesh, const SphereFit& fit);
 Mesh sphereMesh(const SphereFit& fit, int segments, int rings);
 Mesh simplifyMesh(const Mesh& mesh, float fraction);
+struct GeometryReduction {
+    std::vector<uint32_t> indices;
+    float estimatedError = 0.0f;
+};
+// Simplify an indexed position buffer using original vertices and an absolute
+// meshoptimizer error budget. Callers validate application-specific shape and topology.
+GeometryReduction simplifyGeometry(std::span<const float> positions, std::span<const uint32_t> indices,
+                                   std::span<const uint8_t> lockedVertices, std::size_t targetTriangles,
+                                   float maxError, bool lockBoundary);
 void normalizeMesh(Mesh& mesh);
 
 class PlanarAnalysis {

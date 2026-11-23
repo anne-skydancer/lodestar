@@ -25,17 +25,23 @@ FetchContent_MakeAvailable(assimp glm meshoptimizer)
 
 add_library(lodestar_core STATIC
     src/boundary_budget.cpp
+    src/collision.cpp
+    src/convex_hull.cpp
     src/geometry.cpp
     src/lodestar.cpp
+    src/orthogonal_hulls.cpp
     src/planar.cpp
     src/seam.cpp
+    src/surface_calculus.cpp
+    src/surface_fit.cpp
+    src/surface_tessellation.cpp
     src/topology.cpp
 )
-# Preserve operation order in the seam edit's exact arithmetic checks.
+# Preserve operation order in the exact geometry predicates.
 if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    set_property(SOURCE src/seam.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
+    set_property(SOURCE src/seam.cpp src/convex_hull.cpp src/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
-    set_property(SOURCE src/seam.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
+    set_property(SOURCE src/seam.cpp src/convex_hull.cpp src/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
 endif()
 add_library(Lodestar::core ALIAS lodestar_core)
 target_compile_features(lodestar_core PUBLIC cxx_std_20)
@@ -85,7 +91,7 @@ inline constexpr auto fragment = std::to_array<std::uint32_t>(
         list(APPEND shader_outputs "${output}")
     endforeach()
 
-    add_executable(inverseglod src/main.cpp src/renderer.cpp ${shader_outputs})
+    add_executable(inverseglod src/collision_collada.cpp src/main.cpp src/renderer.cpp ${shader_outputs})
     set_target_properties(inverseglod PROPERTIES CXX_EXTENSIONS OFF)
     target_include_directories(inverseglod PRIVATE "${shader_directory}")
     target_link_libraries(inverseglod PRIVATE Lodestar::core Vulkan::Vulkan glfw)
@@ -103,10 +109,33 @@ if(PROJECT_IS_TOP_LEVEL)
 
     include(CTest)
     if(BUILD_TESTING)
+        add_executable(lodestar_surface_calculus_test tests/surface_calculus.cpp)
+        target_link_libraries(lodestar_surface_calculus_test PRIVATE Lodestar::core)
+        add_test(NAME lodestar_surface_calculus COMMAND lodestar_surface_calculus_test)
+        if(LODESTAR_BUILD_VIEWER)
+            add_test(NAME lodestar_surface_calculus_cli COMMAND inverseglod --surface-lod
+                "${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/parabolic-cylinder.patch" --pixel-scale 0.04)
+            set_tests_properties(lodestar_surface_calculus_cli PROPERTIES
+                PASS_REGULAR_EXPRESSION "Generated surface: 15 vertices, 16 triangles")
+        endif()
+
+        if(WIN32)
+            add_executable(lodestar_firestorm_decomp_test tests/firestorm_decomp.cpp)
+            target_compile_features(lodestar_firestorm_decomp_test PRIVATE cxx_std_20)
+            set_target_properties(lodestar_firestorm_decomp_test PROPERTIES CXX_EXTENSIONS OFF)
+            target_include_directories(lodestar_firestorm_decomp_test PRIVATE include integrations/firestorm)
+            add_dependencies(lodestar_firestorm_decomp_test lodestar_c)
+            add_test(NAME lodestar_firestorm_decomp COMMAND lodestar_firestorm_decomp_test $<TARGET_FILE:lodestar_c>)
+        endif()
+
         add_executable(lodestar_core_test tests/core.cpp)
         target_link_libraries(lodestar_core_test PRIVATE Lodestar::core)
         add_test(NAME lodestar_core COMMAND lodestar_core_test
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/planar-scene.dae")
+
+        add_executable(lodestar_collision_test tests/collision.cpp)
+        target_link_libraries(lodestar_collision_test PRIVATE Lodestar::core)
+        add_test(NAME lodestar_collision COMMAND lodestar_collision_test)
 
         add_executable(lodestar_planar_test tests/planar.cpp)
         target_link_libraries(lodestar_planar_test PRIVATE Lodestar::core)

@@ -1,3 +1,4 @@
+#include "collision_collada.hpp"
 #include "renderer.hpp"
 
 #include <lodestar/lodestar.hpp>
@@ -8,7 +9,9 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <memory>
@@ -29,8 +32,16 @@ constexpr int defaultQuality = 4;
 
 struct Options {
     std::optional<std::string> path;
+    std::optional<std::string> surfacePath;
+    std::optional<double> pixelScale;
+    std::optional<double> pixelError;
+    std::optional<std::string> physicsPath;
+    std::optional<ConvexHullOptions> hull;
+    std::optional<std::size_t> hullBudget;
     int quality = defaultQuality;
     bool inspect = false;
+    bool planSize = false;
+    bool coherentHulls = false;
     bool help = false;
 };
 
@@ -45,6 +56,56 @@ Options parseOptions(const std::vector<std::string>& args) {
             options.help = true;
         } else if (readFlags && arg == "--inspect") {
             options.inspect = true;
+        } else if (readFlags && arg == "--plan-size") {
+            options.planSize = true;
+        } else if (readFlags && arg == "--coherent-hulls") {
+            options.coherentHulls = true;
+        } else if (readFlags && arg == "--surface-lod") {
+            if (options.surfacePath || ++i == args.size() || args[i].empty()) {
+                throw std::invalid_argument("--surface-lod requires a Bezier control-point file");
+            }
+            options.surfacePath = args[i];
+        } else if (readFlags && (arg == "--pixel-scale" || arg == "--pixel-error")) {
+            if (++i == args.size()) throw std::invalid_argument("Pixel options require a positive finite number");
+            const auto& value = args[i];
+            double number = 0.0;
+            const auto* end = value.data() + value.size();
+            const auto [next, error] = std::from_chars(value.data(), end, number);
+            if (error != std::errc{} || next != end || !std::isfinite(number) || number <= 0) {
+                throw std::invalid_argument("Pixel options require a positive finite number");
+            }
+            if (arg == "--pixel-scale") options.pixelScale = number;
+            else options.pixelError = number;
+        } else if (readFlags && arg == "--export-physics") {
+            if (options.physicsPath || ++i == args.size() || args[i].empty() || args[i].starts_with('-')) {
+                throw std::invalid_argument("--export-physics requires one output path");
+            }
+            options.physicsPath = args[i];
+        } else if (readFlags && arg == "--convert-to-hulls") {
+            constexpr auto error = "--convert-to-hulls requires a positive maximum hull count";
+            if (options.hullBudget || ++i == args.size()) throw std::invalid_argument(error);
+            std::size_t budget = 0;
+            const auto& value = args[i];
+            const auto* end = value.data() + value.size();
+            const auto [next, status] = std::from_chars(value.data(), end, budget);
+            if (status != std::errc{} || next != end || budget == 0) throw std::invalid_argument(error);
+            options.hullBudget = budget;
+        } else if (readFlags && arg == "--simplify-hull") {
+            constexpr auto error = "--simplify-hull requires a vertex target of at least 4 and a nonnegative error in metres";
+            if (options.hull || args.size() - i < 3) throw std::invalid_argument(error);
+            ConvexHullOptions hull;
+            const auto& vertices = args[++i];
+            const auto& deviation = args[++i];
+            const auto* verticesEnd = vertices.data() + vertices.size();
+            const auto* deviationEnd = deviation.data() + deviation.size();
+            const auto [nextVertex, vertexError] = std::from_chars(vertices.data(), verticesEnd, hull.targetVertices);
+            const auto [nextDeviation, deviationError] = std::from_chars(deviation.data(), deviationEnd, hull.maxDeviation);
+            if (vertexError != std::errc{} || nextVertex != verticesEnd || hull.targetVertices < 4 ||
+                deviationError != std::errc{} || nextDeviation != deviationEnd ||
+                !std::isfinite(hull.maxDeviation) || hull.maxDeviation < 0.0) {
+                throw std::invalid_argument(error);
+            }
+            options.hull = hull;
         } else if (readFlags && arg == "--quality") {
             if (++i == args.size()) throw std::invalid_argument("--quality requires a number from 1 to 12");
             const auto& value = args[i];
@@ -62,7 +123,68 @@ Options parseOptions(const std::vector<std::string>& args) {
             throw std::invalid_argument("Provide a single mesh path");
         }
     }
+    if ((options.hull || options.hullBudget || options.coherentHulls) && !options.physicsPath && !options.help) {
+        throw std::invalid_argument("Hull conversion and simplification require --export-physics");
+    }
+    if (!options.help && options.planSize && (options.inspect || options.physicsPath || options.surfacePath)) {
+        throw std::invalid_argument("Use --plan-size as a separate calculation command");
+    }
+    if (options.coherentHulls && options.hull) throw std::invalid_argument("Coherent hull selection already calculates its geometry; use it without --simplify-hull");
+    if (!options.help && ((options.surfacePath && (options.path || options.physicsPath || options.inspect)) ||
+                         (!options.surfacePath && (options.pixelScale || options.pixelError)))) {
+        throw std::invalid_argument("Use --surface-lod and its pixel options as a separate calculation command");
+    }
     return options;
+}
+
+void inspectSurface(const Options& options) {
+    std::ifstream input(std::filesystem::u8path(*options.surfacePath));
+    BezierTriangle patch;
+    for (auto& control : patch.controls) {
+        if (!(input >> control.x >> control.y >> control.z)) {
+            throw std::invalid_argument("The Bezier file must contain ten finite XYZ control points");
+        }
+    }
+    input >> std::ws;
+    if (!input.eof()) throw std::invalid_argument("Unexpected data after the ten Bezier control points");
+    const auto result = tessellateSurface(patch, options.pixelScale.value_or(0.01), options.pixelError.value_or(0.5));
+    std::cout << std::setprecision(12)
+              << "Surface area integral: " << result.budget.integral.area << '\n'
+              << "Absolute principal curvature integral: " << result.budget.integral.absoluteCurvature << '\n'
+              << "Continuous triangle density integral: " << result.budget.triangleDensityIntegral << '\n'
+              << "World-space error tolerance: " << result.budget.worldError << '\n'
+              << "Maximum interpolation deviation bound: " << result.maximumDeviationBound << '\n'
+              << "Generated surface: " << result.mesh.vertices.size() << " vertices, "
+              << result.mesh.indices.size() / 3 << " triangles\n";
+}
+
+void inspectSize(const Options& options) {
+    const auto mesh = options.path ? loadMesh(*options.path, ImportSpace::Scene) : sampleAsset().original;
+    std::vector<std::array<float, 3>> points;
+    for (const auto& vertex : mesh.vertices) points.push_back({vertex.position.x, vertex.position.y, vertex.position.z});
+    auto plan = planMeshSize(points);
+    bool existingContainer = false;
+    if (plan.requiresContainer && mesh.declaredSceneBounds) {
+        const auto& bounds = *mesh.declaredSceneBounds;
+        const std::array frame{std::array{float(bounds[0].x),float(bounds[0].y),float(bounds[0].z)},
+                               std::array{float(bounds[1].x),float(bounds[1].y),float(bounds[1].z)}};
+        const auto declared = planMeshSize(frame);
+        if (!declared.requiresContainer) {
+            existingContainer = true; plan.requiresContainer = false;
+            plan.center = declared.center; plan.containerSize = declared.visibleSize;
+            plan.containerMinimum = declared.visibleMinimum; plan.containerMaximum = declared.visibleMaximum;
+            plan.visibleFraction = plan.visibleSize / plan.containerSize;
+            plan.requiresHullPhysics = declared.requiresHullPhysics;
+        }
+    }
+    const auto vector = [](const glm::dvec3& v) { std::cout << '[' << v.x << ',' << v.y << ',' << v.z << ']'; };
+    std::cout << std::setprecision(17) << std::boolalpha << "{\"visible_size_m\":";
+    vector(plan.visibleSize); std::cout << ",\"container_size_m\":"; vector(plan.containerSize);
+    std::cout << ",\"center_m\":"; vector(plan.center); std::cout << ",\"visible_fraction\":"; vector(plan.visibleFraction);
+    std::cout << ",\"requires_container\":" << plan.requiresContainer << ",\"requires_hull_physics\":" << plan.requiresHullPhysics
+        << ",\"existing_container_detected\":" << existingContainer
+        << ",\"requires_frame_preservation\":" << existingContainer
+        << ",\"physics_box_alone_changes_render_bounds\":false,\"auto_applied\":false}\n";
 }
 
 std::string_view eligibilityDescription(SphereEligibility status) {
@@ -78,6 +200,63 @@ std::string_view eligibilityDescription(SphereEligibility status) {
 
 void printStats(std::string_view name, const Mesh& mesh) {
     std::cout << name << ": " << mesh.indices.size() / 3 << " triangles, " << mesh.vertices.size() << " vertices\n";
+}
+
+void printCollisionStats(const CollisionMesh& collision) {
+    std::cout << "Physics mesh: " << collision.indices.size() / 3 << " triangles, "
+              << collision.positions.size() << " vertices";
+    if (collision.skippedDegenerateTriangles) {
+        std::cout << " | skipped " << collision.skippedDegenerateTriangles << " zero-area triangles";
+    }
+    std::cout << '\n';
+}
+
+void simplifyExportHull(CollisionMesh& mesh, const ConvexHullOptions& options) {
+    auto hull = simplifyConvexHull(mesh, options);
+    std::cout << "Hull vertices: " << hull.inputVertices << " -> " << hull.mesh.positions.size()
+              << " | maximum deviation " << hull.maxDeviation << " m"
+              << " | vertex target " << (hull.metTarget ? "met" : "unmet") << '\n';
+    mesh = std::move(hull.mesh);
+}
+
+void exportPhysics(const Options& options) {
+    if (!options.path || options.inspect) {
+        throw std::invalid_argument("Use --export-physics with an input mesh and without --inspect");
+    }
+    const auto input = std::filesystem::u8path(*options.path);
+    const auto output = std::filesystem::u8path(*options.physicsPath);
+    if (std::filesystem::exists(output) && std::filesystem::equivalent(input, output)) {
+        throw std::invalid_argument("The physics output path would overwrite the input mesh");
+    }
+    auto collision = buildCollisionMesh(loadMesh(*options.path, ImportSpace::Scene));
+    if (options.coherentHulls) {
+        glm::dvec3 low(std::numeric_limits<double>::infinity()), high(-std::numeric_limits<double>::infinity());
+        for (const auto& p : collision.positions) { const glm::dvec3 v(p[0], p[1], p[2]); low = glm::min(low, v); high = glm::max(high, v); }
+        const auto span = high - low;
+        const auto extent = std::max({span.x, span.y, span.z});
+        std::optional<CoherentCollisionResult> shape;
+        std::string error;
+        for (double divisor : {384., 192., 96., 48.}) {
+            try { shape = buildCoherentCollisionShape(collision, {extent / divisor, options.hullBudget.value_or(256)}); break; }
+            catch (const std::exception& exception) { error = exception.what(); }
+        }
+        if (!shape) throw std::runtime_error(error);
+        writeHullCollada(shape->hulls, output);
+        std::cout << "Coherent collision: " << shape->hulls.size() << " hulls; surface bound " << shape->surfaceErrorBound
+                  << " m; exact solid conversion " << shape->exactSolidConversion << '\n';
+    } else if (options.hullBudget) {
+        auto hulls = decomposeCollisionHulls(collision, *options.hullBudget);
+        if (options.hull) {
+            for (auto& hull : hulls) simplifyExportHull(hull, *options.hull);
+        }
+        writeHullCollada(hulls, output);
+        std::cout << "Convex collision pieces: " << hulls.size() << '\n';
+    } else {
+        if (options.hull) simplifyExportHull(collision, *options.hull);
+        writeCollisionCollada(collision, output);
+        printCollisionStats(collision);
+    }
+    std::cout << "Wrote " << *options.physicsPath << '\n';
 }
 
 double millisecondsSince(Clock::time_point start) {
@@ -127,6 +306,9 @@ void inspect(const Options& options) {
     const auto importStart = Clock::now();
     const auto asset = options.path ? loadAsset(*options.path) : sampleAsset();
     const double importTime = millisecondsSince(importStart);
+    const auto collisionStart = Clock::now();
+    const auto collision = buildCollisionMesh(asset.original);
+    const double collisionTime = millisecondsSince(collisionStart);
     const auto baselineStart = Clock::now();
     const auto baseline = generateMesh(asset, Mode::Baseline, options.quality);
     const double baselineTime = millisecondsSince(baselineStart);
@@ -148,6 +330,7 @@ void inspect(const Options& options) {
     std::cout << "Quality: " << options.quality << " / " << maximumQuality << '\n';
     std::cout << "Source UVs: " << (asset.original.hasUV ? "present" : "none") << '\n';
     printStats("Original", asset.original);
+    printCollisionStats(collision);
     printTopology(inspectTopology(asset.original));
     printStats("Baseline", baseline);
     printStats("Planar", planarMesh);
@@ -183,6 +366,7 @@ void inspect(const Options& options) {
     }
     std::cout << std::fixed << std::setprecision(3)
               << (options.path ? "Import and analysis: " : "Sample and analysis: ") << importTime << " ms\n"
+              << "Physics mesh generation: " << collisionTime << " ms\n"
               << "Baseline generation: " << baselineTime << " ms\n"
               << "Planar analysis: " << planarAnalysisTime << " ms\n"
               << "Planar generation: " << planarGenerationTime << " ms\n"
@@ -190,10 +374,37 @@ void inspect(const Options& options) {
               << "Seam generation: " << seamGenerationTime << " ms\n";
 }
 
+Mesh collisionPreview(const CollisionMesh& collision) {
+    if (collision.indices.empty()) throw std::runtime_error("The physics mesh contains no triangles");
+    Mesh mesh;
+    mesh.vertices.reserve(collision.positions.size());
+    mesh.indices = collision.indices;
+    for (const auto& position : collision.positions) {
+        mesh.vertices.push_back({{position[0], position[1], position[2]}, glm::vec3(0.0f), glm::vec2(0.0f)});
+    }
+    for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+        auto& a = mesh.vertices[mesh.indices[i]];
+        auto& b = mesh.vertices[mesh.indices[i + 1]];
+        auto& c = mesh.vertices[mesh.indices[i + 2]];
+        const auto ab = glm::dvec3(b.position) - glm::dvec3(a.position);
+        const auto ac = glm::dvec3(c.position) - glm::dvec3(a.position);
+        const glm::vec3 normal(glm::normalize(glm::cross(ab, ac)));
+        a.normal += normal;
+        b.normal += normal;
+        c.normal += normal;
+    }
+    for (auto& vertex : mesh.vertices) {
+        vertex.normal = glm::dot(vertex.normal, vertex.normal) > 0.0f
+            ? glm::normalize(vertex.normal) : glm::vec3(0.0f, 1.0f, 0.0f);
+    }
+    return mesh;
+}
+
 class Viewer {
 public:
     Viewer(GLFWwindow* window, Asset asset, int quality)
-        : window_(window), asset_(std::move(asset)), quality_(quality), pendingQuality_(quality) {
+        : window_(window), asset_(std::move(asset)), collision_(buildCollisionMesh(asset_.original)),
+          quality_(quality), pendingQuality_(quality) {
         glfwSetWindowUserPointer(window_, this);
         glfwSetKeyCallback(window_, onKey);
         glfwSetDropCallback(window_, onDrop);
@@ -232,6 +443,7 @@ private:
     static void onKey(GLFWwindow* window, int key, int, int action, int) {
         if (action != GLFW_PRESS && action != GLFW_REPEAT) return;
         auto& viewer = *static_cast<Viewer*>(glfwGetWindowUserPointer(window));
+        if (key >= GLFW_KEY_1 && key <= GLFW_KEY_6) viewer.pendingCollision_ = key == GLFW_KEY_6;
         switch (key) {
         case GLFW_KEY_ESCAPE: glfwSetWindowShouldClose(window, GLFW_TRUE); break;
         case GLFW_KEY_1: viewer.pendingMode_ = Mode::Original; break;
@@ -264,11 +476,14 @@ private:
             const auto path = std::exchange(pendingPath_, {});
             try {
                 auto next = loadAsset(path);
+                auto collision = buildCollisionMesh(next.original);
                 setMesh(next.original);
                 asset_ = std::move(next);
+                collision_ = std::move(collision);
                 planar_.reset();
                 seam_.reset();
                 mode_ = pendingMode_ = renderedMode_ = Mode::Original;
+                showingCollision_ = pendingCollision_ = false;
                 failedLoad_ = false;
             } catch (const std::exception& error) {
                 failedLoad_ = true;
@@ -276,12 +491,15 @@ private:
             }
             showStatus();
         }
-        if (mode_ == pendingMode_ && quality_ == pendingQuality_) return;
+        if (mode_ == pendingMode_ && quality_ == pendingQuality_ && showingCollision_ == pendingCollision_) return;
 
         try {
             const auto nextMode = pendingMode_ == Mode::Sphere && asset_.eligibility != SphereEligibility::Eligible
                 ? Mode::Original : pendingMode_;
-            if (nextMode != renderedMode_ || (nextMode != Mode::Original && quality_ != pendingQuality_)) {
+            if (pendingCollision_) {
+                if (!showingCollision_) setMesh(collisionPreview(collision_));
+            } else if (showingCollision_ || nextMode != renderedMode_ ||
+                       (nextMode != Mode::Original && quality_ != pendingQuality_)) {
                 if (nextMode == Mode::Original) {
                     setMesh(asset_.original);
                 } else if (nextMode == Mode::Planar || nextMode == Mode::Seam) {
@@ -300,6 +518,7 @@ private:
                     setMesh(generateMesh(asset_, nextMode, pendingQuality_));
                 }
             }
+            showingCollision_ = pendingCollision_;
             renderedMode_ = nextMode;
             mode_ = pendingMode_;
             quality_ = pendingQuality_;
@@ -308,6 +527,7 @@ private:
             std::cerr << "Could not update mesh: " << error.what() << '\n';
             pendingMode_ = mode_;
             pendingQuality_ = quality_;
+            pendingCollision_ = showingCollision_;
         }
     }
 
@@ -321,7 +541,9 @@ private:
         std::ostringstream title;
         title << "Lodestar | ";
         if (failedLoad_) title << "Import failed | ";
-        if (mode_ == Mode::Baseline) {
+        if (showingCollision_) {
+            title << "Physics mesh";
+        } else if (mode_ == Mode::Baseline) {
             title << "Baseline";
         } else if (mode_ == Mode::Planar) {
             title << "Planar";
@@ -334,14 +556,17 @@ private:
             if (mode_ == Mode::Sphere) title << " (sphere unavailable)";
         }
         title << " | " << triangleCount_ << '/' << asset_.original.indices.size() / 3 << " triangles"
-              << " | " << vertexCount_ << " vertices | Q " << quality_ << '/' << maximumQuality;
-        if (asset_.fit.valid) {
+              << " | " << vertexCount_ << " vertices";
+        if (!showingCollision_) {
+            title << " | physics " << collision_.indices.size() / 3 << " tris | Q " << quality_ << '/' << maximumQuality;
+        }
+        if (!showingCollision_ && asset_.fit.valid) {
             title << std::fixed << std::setprecision(3) << " | sphere RMS "
                   << 100.0 * asset_.fit.rmsRelativeError << '%';
         }
         glfwSetWindowTitle(window_, title.str().c_str());
         std::cout << title.str() << std::endl;
-        if (mode_ == Mode::Sphere && renderedMode_ == Mode::Original) {
+        if (!showingCollision_ && mode_ == Mode::Sphere && renderedMode_ == Mode::Original) {
             std::cout << "Keeping the source mesh: " << eligibilityDescription(asset_.eligibility) << std::endl;
         }
     }
@@ -349,6 +574,7 @@ private:
     GLFWwindow* window_;
     Renderer renderer_;
     Asset asset_;
+    CollisionMesh collision_;
     std::optional<PlanarAnalysis> planar_;
     std::optional<SeamAnalysis> seam_;
     size_t vertexCount_{};
@@ -358,6 +584,8 @@ private:
     Mode renderedMode_ = Mode::Original;
     int quality_;
     int pendingQuality_;
+    bool showingCollision_ = false;
+    bool pendingCollision_ = false;
     bool failedLoad_ = false;
     float yaw_ = 0.45f;
     float pitch_ = -0.2f;
@@ -380,7 +608,7 @@ void view(const Options& options) {
         glfwCreateWindow(1120, 760, "Lodestar", nullptr, nullptr), glfwDestroyWindow);
     if (!window) throw std::runtime_error("Could not open the Lodestar window");
 
-    std::cout << "Drop a model to import | 1 original, 2 baseline, 3 sphere, 4 planar, 5 seam | Up/Down quality\n"
+    std::cout << "Drop a model to import | 1 original, 2 baseline, 3 sphere, 4 planar, 5 seam, 6 physics | Up/Down quality\n"
               << "Left/Right and W/S orbit | Page Up/Down zoom | Esc exits\n";
     Viewer viewer(window.get(), std::move(asset), options.quality);
     viewer.run();
@@ -391,8 +619,20 @@ int run(const std::vector<std::string>& args) {
         const auto options = parseOptions(args);
         if (options.help) {
             std::cout << "Usage: inverseglod [--inspect] [--quality 1-12] [mesh.dae|mesh.gltf|mesh.glb]\n"
+                      << "       inverseglod --export-physics collision.dae mesh.dae|mesh.gltf|mesh.glb\n"
+                      << "       inverseglod --export-physics collision.dae --simplify-hull vertices max-deviation-m convex-piece.dae\n"
+                      << "       inverseglod --export-physics hulls.dae --convert-to-hulls max-hulls mesh.dae|mesh.gltf|mesh.glb\n"
+                      << "       inverseglod --export-physics hulls.dae --coherent-hulls mesh.dae|mesh.gltf|mesh.glb\n"
+                      << "       inverseglod --plan-size mesh.dae|mesh.gltf|mesh.glb\n"
+                      << "       inverseglod --surface-lod controls.patch [--pixel-scale 0.01] [--pixel-error 0.5]\n"
                       << "Without a mesh path, Lodestar uses a built-in sphere.\n"
                       << "--inspect compares representations and reports the fixed-boundary budget, fit error, and CPU timings.\n";
+        } else if (options.surfacePath) {
+            inspectSurface(options);
+        } else if (options.planSize) {
+            inspectSize(options);
+        } else if (options.physicsPath) {
+            exportPhysics(options);
         } else if (options.inspect) {
             inspect(options);
         } else {

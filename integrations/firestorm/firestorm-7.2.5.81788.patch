@@ -1,0 +1,1997 @@
+diff --git a/indra/llphysicsextensionsos/CMakeLists.txt b/indra/llphysicsextensionsos/CMakeLists.txt
+index c04115ef26..b58dc82947 100644
+--- a/indra/llphysicsextensionsos/CMakeLists.txt
++++ b/indra/llphysicsextensionsos/CMakeLists.txt
+@@ -32,7 +32,14 @@ set_source_files_properties(${llphysicsextensionsos_HEADER_FILES}
+ list(APPEND llphysicsextensionsos_SOURCE_FILES ${llphysicsextensionsos_HEADER_FILES})
+ 
+ add_library (llphysicsextensionsos ${llphysicsextensionsos_SOURCE_FILES})
++set(LODESTAR_SOURCE_DIR "" CACHE PATH "Path to the Lodestar checkout for Analyze decomposition")
++if(NOT EXISTS "${LODESTAR_SOURCE_DIR}/integrations/firestorm/lodestar_firestorm_decomp.hpp")
++    message(FATAL_ERROR "Set LODESTAR_SOURCE_DIR to the Lodestar source tree")
++endif()
+ target_include_directories(llphysicsextensionsos INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
++target_include_directories(llphysicsextensionsos PRIVATE
++    "${LODESTAR_SOURCE_DIR}/include"
++    "${LODESTAR_SOURCE_DIR}/integrations/firestorm")
+ 
+ target_link_libraries(llphysicsextensionsos
+         llcommon
+diff --git a/indra/llphysicsextensionsos/llconvexdecompositionvhacd.cpp b/indra/llphysicsextensionsos/llconvexdecompositionvhacd.cpp
+index b7c4b5e591..01027b1a4e 100644
+--- a/indra/llphysicsextensionsos/llconvexdecompositionvhacd.cpp
++++ b/indra/llphysicsextensionsos/llconvexdecompositionvhacd.cpp
+@@ -37,6 +37,7 @@
+ #include "VHACD.h"
+ 
+ #include "llconvexdecompositionvhacd.h"
++#include <lodestar_firestorm_decomp.hpp>
+ 
+ constexpr S32 MAX_HULLS = 256;
+ constexpr S32 MAX_VERTICES_PER_HULL = 256;
+@@ -75,130 +76,21 @@ LLCDResult LLConvexDecompositionVHACD::quitSystem()
+ 
+ LLConvexDecompositionVHACD::LLConvexDecompositionVHACD()
+ {
+-    // Setup default parameters
+-    mVHACDParameters.m_logger = &mVHACDLogger;
+-
+     mDecompStages[0].mName = "Analyze";
+-    mDecompStages[0].mDescription = nullptr;
+-
+-    LLCDParam param;
+-    param.mName = "Fill Mode";
+-    param.mDescription = nullptr;
+-    param.mType = LLCDParam::LLCD_ENUM;
+-    param.mDetails.mEnumValues.mNumEnums = 3;
+-
+-    static LLCDParam::LLCDEnumItem fill_enums[3];
+-    fill_enums[(size_t)VHACD::FillMode::FLOOD_FILL].mName = "Flood";
+-    fill_enums[(size_t)VHACD::FillMode::FLOOD_FILL].mValue = (int)VHACD::FillMode::FLOOD_FILL;
+-    fill_enums[(size_t)VHACD::FillMode::SURFACE_ONLY].mName = "Surface Only";
+-    fill_enums[(size_t)VHACD::FillMode::SURFACE_ONLY].mValue = (int)VHACD::FillMode::SURFACE_ONLY;
+-    fill_enums[(size_t)VHACD::FillMode::RAYCAST_FILL].mName = "Raycast";
+-    fill_enums[(size_t)VHACD::FillMode::RAYCAST_FILL].mValue = (int)VHACD::FillMode::RAYCAST_FILL;
+-
+-    param.mDetails.mEnumValues.mEnumsArray = fill_enums;
+-    param.mDefault.mIntOrEnumValue = (int)VHACD::FillMode::FLOOD_FILL;
+-    param.mStage = 0;
+-    param.mReserved = -1;
+-    mDecompParams.push_back(param);
++    mDecompStages[0].mDescription = "Decompose with Lodestar";
+ 
+-    enum EVoxelQualityLevels
+-    {
+-        E_LOW_QUALITY = 0,
+-        E_NORMAL_QUALITY,
+-        E_HIGH_QUALITY,
+-        E_VERY_HIGH_QUALITY,
+-        E_ULTRA_QUALITY,
+-        E_MAX_QUALITY,
+-        E_NUM_QUALITY_LEVELS
+-    };
+-
+-    param.mName = "Voxel Resolution";
+-    param.mDescription = nullptr;
+-    param.mType = LLCDParam::LLCD_ENUM;
+-    param.mDetails.mEnumValues.mNumEnums = E_NUM_QUALITY_LEVELS;
+-
+-    static LLCDParam::LLCDEnumItem voxel_quality_enums[E_NUM_QUALITY_LEVELS];
+-    voxel_quality_enums[E_LOW_QUALITY].mName = "Low";
+-    voxel_quality_enums[E_LOW_QUALITY].mValue = 200000;
+-    voxel_quality_enums[E_NORMAL_QUALITY].mName = "Normal";
+-    voxel_quality_enums[E_NORMAL_QUALITY].mValue = 400000;
+-    voxel_quality_enums[E_HIGH_QUALITY].mName = "High";
+-    voxel_quality_enums[E_HIGH_QUALITY].mValue = 800000;
+-    voxel_quality_enums[E_VERY_HIGH_QUALITY].mName = "Very High";
+-    voxel_quality_enums[E_VERY_HIGH_QUALITY].mValue = 1200000;
+-    voxel_quality_enums[E_ULTRA_QUALITY].mName = "Ultra";
+-    voxel_quality_enums[E_ULTRA_QUALITY].mValue = 1600000;
+-    voxel_quality_enums[E_MAX_QUALITY].mName = "Maximum";
+-    voxel_quality_enums[E_MAX_QUALITY].mValue = 2000000;
+-
+-    param.mDetails.mEnumValues.mEnumsArray = voxel_quality_enums;
+-    param.mDefault.mIntOrEnumValue = 400000;
++    LLCDParam param{};
++    param.mType = LLCDParam::LLCD_FLOAT;
++    param.mDetails.mRange.mDelta.mFloat = 1.f;
+     param.mStage = 0;
+     param.mReserved = -1;
+-    mDecompParams.push_back(param);
+ 
+     param.mName = "Num Hulls";
+-    param.mDescription = nullptr;
+-    param.mType = LLCDParam::LLCD_FLOAT;
++    param.mDescription = "Maximum convex pieces; fidelity and format checks apply";
+     param.mDetails.mRange.mLow.mFloat = 1.f;
+     param.mDetails.mRange.mHigh.mFloat = MAX_HULLS;
+-    param.mDetails.mRange.mDelta.mFloat = 1.f;
+-    param.mDefault.mFloat = 8.f;
+-    param.mStage = 0;
+-    param.mReserved = -1;
+-    mDecompParams.push_back(param);
+-
+-    param.mName = "Num Vertices";
+-    param.mDescription = nullptr;
+-    param.mType = LLCDParam::LLCD_FLOAT;
+-    param.mDetails.mRange.mLow.mFloat = 3.f;
+-    param.mDetails.mRange.mHigh.mFloat = MAX_VERTICES_PER_HULL;
+-    param.mDetails.mRange.mDelta.mFloat = 1.f;
+-    param.mDefault.mFloat = 32.f;
+-    param.mStage = 0;
+-    param.mReserved = -1;
+-    mDecompParams.push_back(param);
+-
+-    param.mName = "Error Tolerance";
+-    param.mDescription = nullptr;
+-    param.mType = LLCDParam::LLCD_FLOAT;
+-    param.mDetails.mRange.mLow.mFloat = 0.0001f;
+-    param.mDetails.mRange.mHigh.mFloat = 99.f;
+-    param.mDetails.mRange.mDelta.mFloat = 0.001f;
+-    param.mDefault.mFloat = 1.f;
+-    param.mStage = 0;
+-    param.mReserved = -1;
++    param.mDefault.mFloat = MAX_HULLS;
+     mDecompParams.push_back(param);
+-
+-    for (const LLCDParam& param : mDecompParams)
+-    {
+-        const char* const name = param.mName;
+-
+-        switch (param.mType)
+-        {
+-        case LLCDParam::LLCD_FLOAT:
+-        {
+-            setParam(name, param.mDefault.mFloat);
+-            break;
+-        }
+-        case LLCDParam::LLCD_ENUM:
+-        case LLCDParam::LLCD_INTEGER:
+-        {
+-            setParam(name, param.mDefault.mIntOrEnumValue);
+-            break;
+-        }
+-        case LLCDParam::LLCD_BOOLEAN:
+-        {
+-            setParam(name, (param.mDefault.mBool != 0));
+-            break;
+-        }
+-        case LLCDParam::LLCD_INVALID:
+-        default:
+-        {
+-            break;
+-        }
+-        }
+-    }
+ }
+ 
+ LLConvexDecompositionVHACD::~LLConvexDecompositionVHACD()
+@@ -272,16 +164,11 @@ LLCDResult LLConvexDecompositionVHACD::setParam(const char* name, float val)
+ 
+     if (name == "Num Hulls"sv)
+     {
+-        mVHACDParameters.m_maxConvexHulls = llclamp(ll_round(val), 1, MAX_HULLS);
+-    }
+-    else if (name == "Num Vertices"sv)
+-    {
+-        mVHACDParameters.m_maxNumVerticesPerCH = llclamp(ll_round(val), 3, MAX_VERTICES_PER_HULL);
+-    }
+-    else if (name == "Error Tolerance"sv)
+-    {
+-        mVHACDParameters.m_minimumVolumePercentErrorAllowed = val;
++        mMaxHulls = llclamp(ll_round(val), 1, MAX_HULLS);
+     }
++    else if (name == "Lodestar Metric X"sv) mMetricScale[0] = val;
++    else if (name == "Lodestar Metric Y"sv) mMetricScale[1] = val;
++    else if (name == "Lodestar Metric Z"sv) mMetricScale[2] = val;
+     return LLCD_OK;
+ }
+ 
+@@ -292,19 +179,7 @@ LLCDResult LLConvexDecompositionVHACD::setParam(const char* name, bool val)
+ 
+ LLCDResult LLConvexDecompositionVHACD::setParam(const char* name, int val)
+ {
+-    LLMutexLock lock(&mParamsMutex);
+-
+-    using namespace std::literals;
+-
+-    if (name == "Fill Mode"sv)
+-    {
+-        mVHACDParameters.m_fillMode = (VHACD::FillMode)val;
+-    }
+-    else if (name == "Voxel Resolution"sv)
+-    {
+-        mVHACDParameters.m_resolution = val;
+-    }
+-    return LLCD_OK;
++    return setParam(name, static_cast<float>(val));
+ }
+ 
+ LLCDResult LLConvexDecompositionVHACD::setMeshData( const LLCDMeshData* data, bool vertex_based )
+@@ -345,59 +220,100 @@ LLCDResult LLConvexDecompositionVHACD::executeStage(int stage)
+         return LLCD_NULL_PTR;
+     }
+ 
+-    bound_decomp->mDecomposedHulls.clear();
+-
+-    const auto& decomp_mesh = bound_decomp->mSourceMesh;
+-
+-    VHACDCallback callbacks;
+-    VHACD::IVHACD::Parameters current_params;
++    const auto& source = bound_decomp->mSourceMesh;
++    size_t max_hulls;
++    F32 metric_scale[3];
++    llcdCallbackFunc callback;
+     {
+         LLMutexLock lock(&mParamsMutex);
+-
+-        current_params = mVHACDParameters;
+-        callbacks.setCallbackFunc(mCurrentCallbackFunc);
++        max_hulls = mMaxHulls;
++        for (S32 axis = 0; axis < 3; ++axis) metric_scale[axis] = mMetricScale[axis];
++        callback = mCurrentCallbackFunc;
+     }
+-    current_params.m_callback = &callbacks;
+-
+-    auto vhacd_impl = VHACD::CreateVHACD();
+-    if (!vhacd_impl)
+-    {
+-        LL_WARNS() << "Failed to create VHACD instance" << LL_ENDL;
+-        return LLCD_NULL_PTR;
+-    }
+-
+-
+-    if (!vhacd_impl->Compute((const double*)decomp_mesh.mVertices.data(), static_cast<uint32_t>(decomp_mesh.mVertices.size()),
+-                             (const uint32_t*)decomp_mesh.mIndices.data(), static_cast<uint32_t>(decomp_mesh.mIndices.size()),
+-                             current_params))
++    if (callback && !callback("Lodestar is decomposing the mesh", 0, 1))
+     {
+-        vhacd_impl->Release();
+         return LLCD_INVALID_HULL_DATA;
+     }
+ 
+-    uint32_t num_convex_hulls = vhacd_impl->GetNConvexHulls();
+-    if (num_convex_hulls == 0)
++    try
+     {
+-        vhacd_impl->Release();
+-        return LLCD_INVALID_HULL_DATA;
+-    }
++        for (const auto scale : metric_scale) if (!std::isfinite(scale) || scale <= 0) throw std::runtime_error("Invalid source metric scale");
++        std::vector<lodestar_collision_vertex> positions;
++        positions.reserve(source.mVertices.size());
++        for (const auto& vertex : source.mVertices)
++        {
++            // Restore metric distances through the model's nonuniform normalization.
++            positions.push_back({{static_cast<float>(vertex.mX * metric_scale[0]),
++                                  static_cast<float>(vertex.mY * metric_scale[1]),
++                                  static_cast<float>(vertex.mZ * metric_scale[2])}});
++        }
++        std::vector<uint32_t> indices;
++        indices.reserve(source.mIndices.size() * 3);
++        for (const auto& triangle : source.mIndices)
++        {
++            indices.insert(indices.end(), {triangle.mI0, triangle.mI1, triangle.mI2});
++        }
+ 
+-    for (uint32_t i = 0; num_convex_hulls > i; ++i)
++        std::vector<lodestar::firestorm::Hull> pieces;
++        lodestar_coherent_collision_info fidelity{};
++        F64 extent = 0;
++        for (S32 axis = 0; axis < 3; ++axis)
++        {
++            F64 low = F64_MAX, high = -F64_MAX;
++            for (const auto& point : positions) { low = std::min(low, F64(point.position[axis])); high = std::max(high, F64(point.position[axis])); }
++            extent = std::max(extent, high - low);
++        }
++        std::string last_error;
++        for (const F64 divisor : {384., 192., 96., 48.})
++        {
++            try
++            {
++                pieces = lodestar::firestorm::decompose(positions, indices, max_hulls, 256, {}, extent / divisor, &fidelity);
++                break;
++            }
++            catch (const std::exception& error) { last_error = error.what(); }
++        }
++        if (pieces.empty()) throw std::runtime_error(last_error.empty() ? "No coherent collision cover fits the format limits" : last_error);
++        LL_INFOS("Lodestar") << "Coherent hull surface bound " << fidelity.surface_error_bound
++            << " m; exact solid conversion " << fidelity.exact_solid_conversion << LL_ENDL;
++        std::vector<LLConvexMesh> hulls;
++        hulls.reserve(pieces.size());
++        for (const auto& piece : pieces)
++        {
++            LLConvexMesh mesh;
++            mesh.vertices.reserve(piece.positions.size());
++            for (const auto& vertex : piece.positions)
++            {
++                mesh.vertices.emplace_back(vertex.position[0] / metric_scale[0],
++                    vertex.position[1] / metric_scale[1], vertex.position[2] / metric_scale[2]);
++            }
++            mesh.indices.reserve(piece.indices.size() / 3);
++            for (size_t i = 0; i < piece.indices.size(); i += 3)
++            {
++                mesh.indices.emplace_back(piece.indices[i], piece.indices[i + 1], piece.indices[i + 2]);
++            }
++            hulls.push_back(std::move(mesh));
++        }
++        const std::string completed = llformat("Lodestar hull surface bound: %.7g m against selected physics, before packing; exact solid conversion: %s.",
++            fidelity.surface_error_bound, fidelity.exact_solid_conversion ? "yes" : "no");
++        if (callback && !callback(completed.c_str(), 1, 1))
++        {
++            return LLCD_INVALID_HULL_DATA;
++        }
++        bound_decomp->mDecomposedHulls = std::move(hulls);
++        LL_INFOS("Lodestar") << "Analyze produced " << pieces.size() << " hulls." << LL_ENDL;
++        return LLCD_OK;
++    }
++    catch (const std::exception& error)
+     {
+-        VHACD::IVHACD::ConvexHull ch;
+-        if (!vhacd_impl->GetConvexHull(i, ch))
+-            continue;
+-
+-        LLConvexMesh out_mesh;
+-        out_mesh.setVertices(ch.m_points);
+-        out_mesh.setIndices(ch.m_triangles);
+-
+-        bound_decomp->mDecomposedHulls.push_back(std::move(out_mesh));
++        const std::string message = std::string("Lodestar: ") + error.what();
++        LL_WARNS("Lodestar") << message << LL_ENDL;
++        if (callback)
++        {
++            callback(message.c_str(), 0, 1);
++        }
++        return LLCD_INVALID_HULL_DATA;
+     }
+-
+-    vhacd_impl->Release();
+-
+-    return LLCD_OK;
+ }
+ 
+ LLCDResult LLConvexDecompositionVHACD::buildSingleHull()
+diff --git a/indra/llphysicsextensionsos/llconvexdecompositionvhacd.h b/indra/llphysicsextensionsos/llconvexdecompositionvhacd.h
+index 27c867704e..3030b9753f 100644
+--- a/indra/llphysicsextensionsos/llconvexdecompositionvhacd.h
++++ b/indra/llphysicsextensionsos/llconvexdecompositionvhacd.h
+@@ -41,43 +41,6 @@ class LLDecompDataVHACD;
+ 
+ class LLConvexDecompositionVHACD : public LLSimpleton<LLConvexDecompositionVHACD>, public LLConvexDecomposition
+ {
+-    class VHACDCallback : public VHACD::IVHACD::IUserCallback
+-    {
+-    public:
+-        void Update(const double overallProgress, const double stageProgress, const char* const stage, const char* operation) override
+-        {
+-            std::string out_msg = llformat("Stage: %s Operation: %s", stage, operation);
+-            if (mCurrentStage != stage && mCurrentOperation != operation)
+-            {
+-                mCurrentStage = stage;
+-                mCurrentOperation = operation;
+-                LL_INFOS("VHACD") << out_msg << LL_ENDL;
+-            }
+-
+-            if(mCallbackFunc)
+-            {
+-                mCallbackFunc(out_msg.c_str(), ll_round(static_cast<F32>(stageProgress)), ll_round(static_cast<F32>(overallProgress)));
+-            }
+-        }
+-
+-        void setCallbackFunc(llcdCallbackFunc func)
+-        {
+-            mCallbackFunc = func;
+-        }
+-
+-    private:
+-        std::string mCurrentStage;
+-        std::string mCurrentOperation;
+-        llcdCallbackFunc mCallbackFunc = nullptr;
+-    };
+-
+-    class VHACDLogger : public VHACD::IVHACD::IUserLogger
+-    {
+-        void Log(const char* const msg) override
+-        {
+-            LL_INFOS("VHACD") << msg << LL_ENDL;
+-        }
+-    };
+ 
+ public:
+ 
+@@ -338,11 +301,11 @@ private:
+ 
+     std::unordered_map<int, data_ptr_t> mDecompData;
+ 
+-    VHACDLogger    mVHACDLogger;
+ 
+     LLMutex mParamsMutex;
+-    VHACD::IVHACD::Parameters mVHACDParameters;
+-    llcdCallbackFunc mCurrentCallbackFunc;
++    S32 mMaxHulls = 256;
++    F32 mMetricScale[3] = {1.f, 1.f, 1.f};
++    llcdCallbackFunc mCurrentCallbackFunc = nullptr;
+ 
+     LLConvexMesh mMeshFromHullData;
+     LLConvexMesh mSingleHullMeshFromMeshData;
+diff --git a/indra/llprimitive/lldaeloader.cpp b/indra/llprimitive/lldaeloader.cpp
+index 9b8ce58cbd..05f3df10e9 100644
+--- a/indra/llprimitive/lldaeloader.cpp
++++ b/indra/llprimitive/lldaeloader.cpp
+@@ -56,6 +56,7 @@
+ #include "glm/mat4x4.hpp"
+ #include "glm/gtc/type_ptr.hpp"
+ #include "llmatrix4a.h"
++#include <sstream>
+ 
+ #include <boost/regex.hpp>
+ #include <boost/algorithm/string/replace.hpp>
+@@ -2681,6 +2682,54 @@ bool LLDAELoader::loadModelsFromDomMesh(domMesh* mesh, std::vector<LLModel*>& mo
+     ret->sortVolumeFacesByMaterialName();
+ 
+     bool normalized = false;
++    LLVector3 physical_minimum, physical_maximum;
++    bool physical_frame = false;
++    const auto invalid_physical_frame = [&]() {
++        LL_WARNS("Lodestar") << "Invalid physical container frame; model import rejected." << LL_ENDL;
++        delete ret;
++        return false;
++    };
++    // Lodestar exports source coordinates unchanged. Its physical container is
++    // metadata and collision geometry, never extra render vertices or faces.
++    const auto extras = mesh->getParentElement()->getChildren();
++    for (size_t e = 0; e < extras.getCount(); ++e)
++    {
++        const auto& extra = extras[e];
++        if (std::string(extra->getElementName()) != "extra") continue;
++        const auto techniques = extra->getChildren();
++        for (size_t t = 0; t < techniques.getCount(); ++t)
++        {
++            const auto& technique = techniques[t];
++            if (std::string(technique->getElementName()) != "technique" || technique->getAttribute("profile") != "LODESTAR") continue;
++            const auto frames = technique->getChildren();
++            for (size_t f = 0; f < frames.getCount(); ++f)
++            {
++                const auto& frame = frames[f];
++                if (std::string(frame->getElementName()) != "physical_container") continue;
++                if (physical_frame || mNoNormalize || frame->getAttribute("version") != "1") return invalid_physical_frame();
++                const auto parse = [](const std::string& text, LLVector3& value) {
++                    std::string values = text;
++                    std::replace(values.begin(), values.end(), ',', ' ');
++                    std::istringstream input(values);
++                    if (!(input >> value[0] >> value[1] >> value[2])) return false;
++                    input >> std::ws;
++                    return input.eof() && llfinite(value[0]) && llfinite(value[1]) && llfinite(value[2]);
++                };
++                if (!parse(frame->getAttribute("minimum"), physical_minimum) ||
++                    !parse(frame->getAttribute("maximum"), physical_maximum)) return invalid_physical_frame();
++                for (S32 axis = 0; axis < 3; ++axis)
++                {
++                    if (physical_maximum[axis] <= physical_minimum[axis] || !llfinite(physical_maximum[axis]-physical_minimum[axis])) return invalid_physical_frame();
++                    const F32 allowance = 2e-6f * std::max({fabsf(physical_minimum[axis]), fabsf(physical_maximum[axis]), physical_maximum[axis]-physical_minimum[axis]});
++                    for (const auto& face : ret->getVolumeFaces())
++                        for (S32 vertex = 0; vertex < face.mNumVertices; ++vertex)
++                            if (face.mPositions[vertex][axis] < physical_minimum[axis]-allowance ||
++                                face.mPositions[vertex][axis] > physical_maximum[axis]+allowance) return invalid_physical_frame();
++                }
++                physical_frame = true;
++            }
++        }
++    }
+ 
+     int submodelID = 0;
+ 
+@@ -2699,7 +2748,7 @@ bool LLDAELoader::loadModelsFromDomMesh(domMesh* mesh, std::vector<LLModel*>& mo
+         if (!normalized && !mNoNormalize)
+         {
+             normalized = true;
+-            ret->normalizeVolumeFaces();
++            ret->normalizeVolumeFaces(physical_frame ? &physical_minimum : nullptr, physical_frame ? &physical_maximum : nullptr);
+         }
+ 
+         ret->trimVolumeFacesToSize(LL_SCULPT_MESH_MAX_FACES, &remainder);
+@@ -2728,6 +2777,7 @@ bool LLDAELoader::loadModelsFromDomMesh(domMesh* mesh, std::vector<LLModel*>& mo
+             next->getVolumeFaces() = remainder;
+             next->mNormalizedScale = ret->mNormalizedScale;
+             next->mNormalizedTranslation = ret->mNormalizedTranslation;
++            next->mLodestarPhysicalContainer = ret->mLodestarPhysicalContainer;
+ 
+             if ( ret->mMaterialList.size() > LL_SCULPT_MESH_MAX_FACES)
+             {
+diff --git a/indra/llprimitive/llmodel.cpp b/indra/llprimitive/llmodel.cpp
+index a34f1a1db7..f3d4763b46 100644
+--- a/indra/llprimitive/llmodel.cpp
++++ b/indra/llprimitive/llmodel.cpp
+@@ -200,7 +200,7 @@ void LLModel::trimVolumeFacesToSize(U32 new_count, LLVolume::face_list_t* remain
+ // to be the "original" extents and position.
+ // Also, the positions will fit
+ // within the unit cube.
+-void LLModel::normalizeVolumeFaces()
++void LLModel::normalizeVolumeFaces(const LLVector3* physical_minimum, const LLVector3* physical_maximum)
+ {
+     if (!mVolumeFaces.empty())
+     {
+@@ -240,6 +240,15 @@ void LLModel::normalizeVolumeFaces()
+             }
+         }
+ 
++        // A physical frame changes normalization, not the render triangle stream.
++        // The matching instance transform restores the authored surface in metres.
++        if (physical_minimum && physical_maximum)
++        {
++            min.load3(physical_minimum->mV);
++            max.load3(physical_maximum->mV);
++            mLodestarPhysicalContainer = true;
++        }
++
+         // Now that we have the extents of the model
+         // we can compute the offset needed to center
+         // the model at the origin.
+@@ -310,7 +319,9 @@ void LLModel::normalizeVolumeFaces()
+                 {
+ // <FS:Beq> BUG-228952 - bad vertex normal scaling on mesh asset import
+                     // norm[j].mul(inv_scale);
+-                    if (!gSavedSettings.getBOOL("FSMeshImportScaleFixup"))
++                    // Physical frames use the inverse-transpose normal rule
++                    // regardless of the legacy import compatibility setting.
++                    if ((physical_minimum && physical_maximum) || !gSavedSettings.getBOOL("FSMeshImportScaleFixup"))
+                     {
+                         norm[j].mul(inv_scale);
+                     }
+@@ -951,7 +962,7 @@ LLSD LLModel::writeModel(
+                     for (U32 k = 0; k < 3; ++k)
+                     { //for each component
+                         //convert to 16-bit normalized across domain
+-                        U16 val = (U16) (((pos[k]-min_pos.mV[k])/pos_range.mV[k])*65535);
++                        U16 val = pos_range.mV[k] > 0.f ? (U16) (((pos[k]-min_pos.mV[k])/pos_range.mV[k])*65535) : 0;
+ 
+                         U8* buff = (U8*) &val;
+                         //write to binary buffer
+@@ -1001,7 +1012,7 @@ LLSD LLModel::writeModel(
+                         for (U32 k = 0; k < 2; ++k)
+                         { //for each component
+                             //convert to 16-bit normalized
+-                            U16 val = (U16) ((src_tc[k]-min_tc.mV[k])/tc_range.mV[k]*65535);
++                            U16 val = tc_range.mV[k] > 0.f ? (U16) ((src_tc[k]-min_tc.mV[k])/tc_range.mV[k]*65535) : 0;
+ 
+                             U8* buff = (U8*) &val;
+                             //write to binary buffer
+diff --git a/indra/llprimitive/llmodel.h b/indra/llprimitive/llmodel.h
+index 56eb0ef715..07879d3162 100644
+--- a/indra/llprimitive/llmodel.h
++++ b/indra/llprimitive/llmodel.h
+@@ -209,7 +209,7 @@ public:
+     void addFace(const LLVolumeFace& face);
+ 
+     void sortVolumeFacesByMaterialName();
+-    void normalizeVolumeFaces();
++    void normalizeVolumeFaces(const LLVector3* physical_minimum = nullptr, const LLVector3* physical_maximum = nullptr);
+     void normalizeVolumeFacesAndWeights();
+     void trimVolumeFacesToSize(U32 new_count = LL_SCULPT_MESH_MAX_FACES, LLVolume::face_list_t* remainder = NULL);
+     void remapVolumeFaces();
+@@ -301,6 +301,7 @@ public:
+ 
+     LLVector3 mNormalizedScale;
+     LLVector3 mNormalizedTranslation;
++    bool mLodestarPhysicalContainer = false;
+ 
+     float   mPelvisOffset;
+     // convex hull decomposition
+diff --git a/indra/newview/llfloatermodelpreview.cpp b/indra/newview/llfloatermodelpreview.cpp
+index 1bd95ced0f..495ccc2785 100644
+--- a/indra/newview/llfloatermodelpreview.cpp
++++ b/indra/newview/llfloatermodelpreview.cpp
+@@ -66,6 +66,9 @@
+ #include "llviewertexteditor.h"
+ #include "llviewernetwork.h"
+ #include "llmaterialeditor.h"
++#include "llsdserialize.h"
++#include "lldir.h"
++#include <fstream>
+ 
+ 
+ //static
+@@ -149,18 +152,7 @@ mAvatarTabIndex(0)
+     mLODMode[LLModel::LOD_HIGH] = LLModelPreview::LOD_FROM_FILE;
+     for (U32 i = 0; i < LLModel::LOD_HIGH; i++)
+     {
+-        // <FS:Beq> FIRE-32267 - Set default LOD mode to GLOD
+-        // mLODMode[i] = LLModelPreview::MESH_OPTIMIZER_AUTO;
+-        static LLCachedControl<bool> default_to_glod(gSavedSettings, "FSMeshUploadUseGLODAsDefault");
+-        if( default_to_glod )
+-        {
+-            mLODMode[i] = LLModelPreview::GENERATE;
+-        }
+-        else
+-        {
+-            mLODMode[i] = LLModelPreview::MESH_OPTIMIZER_AUTO;
+-        }
+-        // </FS:Beq>
++        mLODMode[i] = LLModelPreview::LODESTAR_AUTO;
+     }
+ }
+ 
+@@ -187,6 +179,10 @@ bool LLFloaterModelPreview::postBuild()
+     getChild<LLCheckBoxCtrl>("gen_normals")->setCommitCallback(boost::bind(&LLFloaterModelPreview::toggleGenarateNormals, this));
+ 
+     childSetCommitCallback("lod_generate", onAutoFillCommit, this);
++    getChild<LLButton>("lodestar_prepare")->setCommitCallback([this](LLUICtrl*, const LLSD&)
++    {
++        startLodestarPreparation(mLodestarSource.empty() ? mModelPreview->mLODFile[LLModel::LOD_HIGH] : mLodestarSource);
++    });
+ 
+     for (S32 lod = 0; lod <= LLModel::LOD_HIGH; ++lod)
+     {
+@@ -380,6 +376,10 @@ void LLFloaterModelPreview::reshape(S32 width, S32 height, bool called_from_pare
+ //-----------------------------------------------------------------------------
+ LLFloaterModelPreview::~LLFloaterModelPreview()
+ {
++    for (auto& request : mAnalyzeRequests)
++    {
++        request->mContinue = 0;
++    }
+     sInstance = NULL;
+ 
+     if ( mModelPreview )
+@@ -393,6 +393,7 @@ LLFloaterModelPreview::~LLFloaterModelPreview()
+ 
+ void LLFloaterModelPreview::initModelPreview()
+ {
++    cancelPhysicsAnalysis();
+     if (mModelPreview)
+     {
+         delete mModelPreview;
+@@ -551,6 +552,7 @@ void LLFloaterModelPreview::prepareToLoadModel(S32 lod)
+     {
+         return;
+     }
++    cancelPhysicsAnalysis();
+     mModelPreview->mLoading = true;
+     // </FS:Ansariel>
+ 
+@@ -558,7 +560,6 @@ void LLFloaterModelPreview::prepareToLoadModel(S32 lod)
+     if (lod == LLModel::LOD_PHYSICS)
+     {
+         // loading physics from file
+-        mModelPreview->mPhysicsSearchLOD = lod;
+         mModelPreview->mWarnOfUnmatchedPhyicsMeshes = false;
+     }
+ }
+@@ -576,6 +577,20 @@ void LLFloaterModelPreview::loadModel(S32 lod, const std::string& file_name, boo
+ 
+ void LLFloaterModelPreview::onClickCalculateBtn()
+ {
++    if (!mModelPreview || mModelPreview->mLoading || !mModelPreview->lodsReady() ||
++        mLodestarStage || mLodestarBlocked || !mAnalyzeRequests.empty() || mPhysicsFeePending)
++    {
++        return;
++    }
++
++    mModelPreview->rebuildUploadData();
++    mModelPreview->updateStatusMessages();
++    if (!mModelPreview->mModelNoErrors || mModelPreview->mHasDegenerate)
++    {
++        addStringToLog("Lodestar: Fee calculation is blocked by mesh or physics validation.", true);
++        return;
++    }
++
+     clearLogTab();
+     addStringToLog("Calculating model data.", false);
+     mModelPreview->rebuildUploadData();
+@@ -590,6 +605,7 @@ void LLFloaterModelPreview::onClickCalculateBtn()
+     lod_sources_map_t lod_sources;
+     fillLODSourceStatistics(lod_sources);
+ 
++    mPhysicsFeePending = true;
+     gMeshRepo.uploadModel(mModelPreview->mUploadData, lod_sources, mModelPreview->mPreviewScale,
+                           childGetValue("upload_textures").asBoolean(),
+                           upload_skinweights, upload_joint_positions, lock_scale_if_joint_position,
+@@ -755,6 +771,24 @@ void LLFloaterModelPreview::onImportScaleCommit(LLUICtrl*,void* userdata)
+         return;
+     }
+ 
++    // A changed scale may need a different physical frame. Recalculate from
++    // the authored source so the legal prim minimum never stretches its mesh.
++    bool reframe = false;
++    const F32 scale = (F32)fp->childGetValue("import_scale").asReal();
++    for (const auto& entry : fp->mModelPreview->mBaseScene)
++        for (const auto& instance : entry.second)
++            if (instance.mModel)
++            {
++                reframe |= instance.mModel->mLodestarPhysicalContainer;
++                for (S32 axis = 0; axis < 3; ++axis)
++                    reframe |= LLVector3(entry.first.mMatrix[axis]).magVec() * scale < .01f;
++            }
++    if (reframe && !fp->mLodestarSource.empty())
++    {
++        fp->startLodestarPreparation(fp->mLodestarSource);
++        return;
++    }
++
+     fp->mModelPreview->mDirty = true;
+ 
+     fp->toggleCalculateButton(true);
+@@ -829,16 +863,19 @@ void LLFloaterModelPreview::onExplodeCommit(LLUICtrl* ctrl, void* userdata)
+ void LLFloaterModelPreview::onAutoFillCommit(LLUICtrl* ctrl, void* userdata)
+ {
+     LLFloaterModelPreview* fp = (LLFloaterModelPreview*) userdata;
+-
+-    fp->mModelPreview->queryLODs();
++    fp->startLodestarPreparation(fp->mLodestarSource.empty() ? fp->mModelPreview->mLODFile[LLModel::LOD_HIGH] : fp->mLodestarSource);
+ }
+ 
+ void LLFloaterModelPreview::onLODParamCommit(S32 lod, bool enforce_tri_limit)
+ {
++    if (mLodestarStage) return;
+     LLComboBox* lod_source_combo = getChild<LLComboBox>("lod_source_" + lod_name[lod]);
+     S32 mode = lod_source_combo->getCurrentIndex();
+     switch (mode)
+     {
++    case LLModelPreview::LODESTAR_AUTO:
++        startLodestarPreparation(mLodestarSource.empty() ? mModelPreview->mLODFile[LLModel::LOD_HIGH] : mLodestarSource);
++        return;
+     case LLModelPreview::MESH_OPTIMIZER_AUTO:
+     case LLModelPreview::MESH_OPTIMIZER_SLOPPY:
+     case LLModelPreview::MESH_OPTIMIZER_PRECISE:
+@@ -899,6 +936,7 @@ void LLFloaterModelPreview::draw3dPreview()
+ //-----------------------------------------------------------------------------
+ void LLFloaterModelPreview::draw()
+ {
++    pollLodestarPreparation();
+     LLFloater::draw();
+ 
+     if (!mModelPreview)
+@@ -908,7 +946,18 @@ void LLFloaterModelPreview::draw()
+ 
+     mModelPreview->update();
+ 
+-    if (!mModelPreview->mLoading)
++    if (mLodestarStage || mLodestarBlocked)
++    {
++        mCalculateBtn->setEnabled(false);
++        mUploadBtn->setEnabled(false);
++    }
++    if (mLodestarStage) setLodestarControlsEnabled(false);
++
++    if (!mAnalyzeRequests.empty())
++    {
++        childSetTextArg("status", "[STATUS]", getString("decomposing"));
++    }
++    else if (!mModelPreview->mLoading)
+     {
+         if ( mModelPreview->getLoadState() == LLModelLoader::ERROR_MATERIALS_NOT_A_SUBSET )// <FS:Beq/> Improve error reporting
+         {
+@@ -1063,6 +1112,10 @@ void LLFloaterModelPreview::onOpen(const LLSD& key)
+ /*virtual*/
+ void LLFloaterModelPreview::onClose(bool app_quitting)
+ {
++    mLodestarProcess.reset();
++    mLodestarStage = 0;
++    setLodestarControlsEnabled(true);
++    cancelPhysicsAnalysis();
+     LLModelPreview::sIgnoreLoadedCallback = true;
+ }
+ 
+@@ -1123,6 +1176,12 @@ void LLFloaterModelPreview::onPhysicsStageExecute(LLUICtrl* ctrl, void* data)
+             return;
+         }
+ 
++        if (stage == "Analyze")
++        {
++            sInstance->startPhysicsAnalysis();
++            return;
++        }
++
+         if (sInstance->mModelPreview)
+         {
+             for (S32 i = 0; i < sInstance->mModelPreview->mModel[LLModel::LOD_PHYSICS].size(); ++i)
+@@ -1133,13 +1192,7 @@ void LLFloaterModelPreview::onPhysicsStageExecute(LLUICtrl* ctrl, void* data)
+                 gMeshRepo.mDecompThread->submitRequest(request);
+             }
+         }
+-        if (stage == "Analyze")
+-        {
+-            sInstance->setStatusMessage(sInstance->getString("decomposing"));
+-            sInstance->childSetVisible("Analyze", false);
+-            sInstance->childSetVisible("analyze_cancel", true);
+-        }
+-        else if (stage == "Decompose")
++        if (stage == "Decompose")
+         {
+             sInstance->setStatusMessage(sInstance->getString("decomposing"));
+             sInstance->childSetVisible("Decompose", false);
+@@ -1156,6 +1209,189 @@ void LLFloaterModelPreview::onPhysicsStageExecute(LLUICtrl* ctrl, void* data)
+     }
+ }
+ 
++#include "llfloatermodelpreview_lodestar.inc"
++
++void LLFloaterModelPreview::reportPhysicsAnalysisFailure(const std::string& message)
++{
++    const std::string result = message + (mLodestarStage == 3 ?
++        "\nHull conversion is unavailable. Checking the refined triangle collider." :
++        "\nPhysics analysis failed. No replacement collider was applied.");
++    addStringToLog(result, true);
++    getChild<LLTextBox>("lodestar_analysis_summary")->setText(result);
++    if (mLodestarStage == 3) return;
++    LLSD args;
++    args["MESSAGE"] = result;
++    LLNotificationsUtil::add("GenericAlert", args);
++}
++
++void LLFloaterModelPreview::startPhysicsAnalysis()
++{
++    if (!mModelPreview || mModelPreview->mLoading)
++    {
++        return;
++    }
++    if (mPhysicsFeePending)
++    {
++        reportPhysicsAnalysisFailure("Lodestar: Wait for the current fee calculation to finish before analyzing physics.");
++        return;
++    }
++
++    const auto& models = mModelPreview->mModel[LLModel::LOD_PHYSICS];
++    if (models.empty())
++    {
++        reportPhysicsAnalysisFailure("Lodestar: Select a physics source to analyze.");
++        return;
++    }
++
++    std::set<LLModel*> seen;
++    std::set<LLModel*> required_hulls;
++    if (mLodestarStage == 3)
++    {
++        mModelPreview->rebuildUploadData();
++        for (const auto& instance : mModelPreview->mUploadData)
++        {
++            if (instance.mModel.isNull() || instance.mModel->mSubmodelID || instance.mLOD[LLModel::LOD_PHYSICS].isNull()) continue;
++            const auto& matrix = instance.mTransform.mMatrix;
++            const F32 smallest = std::min({LLVector3(matrix[VX]).magVec(), LLVector3(matrix[VY]).magVec(), LLVector3(matrix[VZ]).magVec()});
++            if (smallest < .5f) required_hulls.insert(instance.mLOD[LLModel::LOD_PHYSICS].get());
++        }
++    }
++    std::vector<LLPointer<DecompRequest>> requests;
++    for (const auto& model : models)
++    {
++        if (model.isNull())
++        {
++            reportPhysicsAnalysisFailure("Lodestar: The physics source contains a missing model.");
++            return;
++        }
++        if (!seen.insert(model.get()).second)
++        {
++            continue;
++        }
++        if (!required_hulls.empty() && !required_hulls.contains(model.get())) continue;
++        LLPointer<DecompRequest> request = new DecompRequest("Analyze", model.get());
++        if (!request->mStatusMessage.empty())
++        {
++            reportPhysicsAnalysisFailure(request->mStatusMessage + " Model: " + model->getName());
++            return;
++        }
++        requests.push_back(request);
++    }
++
++    mAnalyzeSource = models;
++    mAnalyzeSourceLOD = mModelPreview->mPhysicsSearchLOD;
++    mAnalyzeRequests = std::move(requests);
++    getChild<LLTextBox>("lodestar_analysis_summary")->setText(std::string("Calculating a coherent collision shape from the selected source..."));
++    for (const auto& request : mAnalyzeRequests)
++    {
++        mCurRequest.insert(request);
++        gMeshRepo.mDecompThread->submitRequest(request.get());
++    }
++
++    childSetVisible("Analyze", false);
++    childSetVisible("analyze_cancel", true);
++    childEnable("analyze_cancel");
++    mCalculateBtn->setEnabled(false);
++    mUploadBtn->setEnabled(false);
++}
++
++void LLFloaterModelPreview::finishPhysicsAnalysis(DecompRequest* request)
++{
++    if (mCurRequest.erase(request) == 0 || !mCurRequest.empty())
++    {
++        return;
++    }
++
++    std::string error;
++    if (!mModelPreview || mModelPreview->mLoading ||
++        mAnalyzeSourceLOD != mModelPreview->mPhysicsSearchLOD ||
++        mAnalyzeSource != mModelPreview->mModel[LLModel::LOD_PHYSICS])
++    {
++        error = "Lodestar: The physics source changed during analysis.";
++    }
++
++    size_t hull_count = 0;
++    size_t vertex_count = 0;
++    size_t largest_hull = 0;
++    for (const auto& result : mAnalyzeRequests)
++    {
++        if (!error.empty())
++        {
++            break;
++        }
++        if (result->mHull.empty() || result->mHull.size() != result->mHullMesh.size())
++        {
++            if (result->mStatusMessage.compare(0, 10, "Lodestar: ") == 0)
++            {
++                error = result->mStatusMessage;
++            }
++            else
++            {
++                error = "Lodestar: Analysis did not produce a usable hull set.";
++            }
++            error += " Model: " + result->mModel->getName();
++            break;
++        }
++        hull_count += result->mHull.size();
++        for (const auto& hull : result->mHull)
++        {
++            vertex_count += hull.size();
++            largest_hull = std::max(largest_hull, hull.size());
++        }
++    }
++
++    if (error.empty())
++    {
++        mLodestarHullsSucceeded = mLodestarStage == 3;
++        for (auto& result : mAnalyzeRequests)
++        {
++            result->mModel->setConvexHullDecomposition(result->mHull, result->mHullMesh);
++            if (!result->mStatusMessage.empty())
++            {
++                addStringToLog(result->mModel->getName() + ": " + result->mStatusMessage, false);
++            }
++        }
++        mUploadModelUrl.clear();
++        mModelPreview->mDirty = true;
++        mModelPreview->refresh();
++        const auto summary = llformat("Lodestar: Generated %zu hulls across %zu physics models, "
++                               "%zu vertices total, largest hull %zu vertices (automatic).",
++                               hull_count, mAnalyzeRequests.size(), vertex_count, largest_hull);
++        addStringToLog(summary, false);
++        getChild<LLTextBox>("lodestar_analysis_summary")->setText(summary);
++    }
++    else
++    {
++        reportPhysicsAnalysisFailure(error);
++    }
++
++    cancelPhysicsAnalysis();
++    if (mModelPreview)
++    {
++        mModelPreview->updateStatusMessages();
++    }
++}
++
++void LLFloaterModelPreview::cancelPhysicsAnalysis()
++{
++    if (mAnalyzeRequests.empty())
++    {
++        return;
++    }
++
++    for (auto& request : mAnalyzeRequests)
++    {
++        request->mContinue = 0;
++        mCurRequest.erase(request);
++    }
++    mAnalyzeRequests.clear();
++    mAnalyzeSource.clear();
++    childSetVisible("Analyze", true);
++    childSetVisible("analyze_cancel", false);
++    mCalculateBtn->setEnabled(true);
++    mUploadBtn->setEnabled(isModelUploadAllowed());
++}
++
+ //static
+ void LLFloaterModelPreview::onPhysicsBrowse(LLUICtrl* ctrl, void* userdata)
+ {
+@@ -1179,6 +1415,8 @@ void LLFloaterModelPreview::onPhysicsUseLOD(LLUICtrl* ctrl, void* userdata)
+         return;
+     }
+ 
++    sInstance->cancelPhysicsAnalysis();
++
+     if (which_mode <= 0)
+     {
+         LL_WARNS() << "which_mode out of range, " << which_mode << LL_ENDL;
+@@ -1300,6 +1538,11 @@ void LLFloaterModelPreview::onPhysicsStageCancel(LLUICtrl* ctrl, void*data)
+ {
+     if (sInstance)
+     {
++        if (!sInstance->mAnalyzeRequests.empty())
++        {
++            sInstance->cancelPhysicsAnalysis();
++        }
++
+         for (std::set<LLPointer<DecompRequest> >::iterator iter = sInstance->mCurRequest.begin();
+             iter != sInstance->mCurRequest.end(); ++iter)
+         {
+@@ -1911,6 +2154,17 @@ void LLFloaterModelPreview::onUpload(void* user_data)
+     assert_main_thread();
+ 
+     LLFloaterModelPreview* mp = (LLFloaterModelPreview*) user_data;
++    if (!mp->mModelPreview || mp->mLodestarStage || mp->mLodestarBlocked || !mp->mAnalyzeRequests.empty())
++    {
++        return;
++    }
++    mp->mModelPreview->rebuildUploadData();
++    mp->mModelPreview->updateStatusMessages();
++    if (!mp->isModelUploadAllowed())
++    {
++        addStringToLog("Lodestar: Upload is blocked by preparation or native validation.", true);
++        return;
++    }
+     mp->clearLogTab();
+ 
+     mp->mUploadBtn->setEnabled(false);
+@@ -1946,13 +2200,72 @@ void LLFloaterModelPreview::refresh()
+ LLFloaterModelPreview::DecompRequest::DecompRequest(const std::string& stage, LLModel* mdl)
+ {
+     mStage = stage;
+-    mContinue = 1;
+     mModel = mdl;
+     mDecompID = &mdl->mDecompID;
+     mParams = sInstance->mDecompParams;
+ 
+-    //copy out positions and indices
+-    assignData(mdl) ;
++    if (stage == "Analyze")
++    {
++        LLVector3 scale, translation;
++        mdl->getNormalizedScaleTranslation(scale, translation);
++        const F64 import_scale = sInstance->childGetValue("import_scale").asReal();
++        mParams["Lodestar Metric X"] = F64(scale.mV[VX]) * import_scale;
++        mParams["Lodestar Metric Y"] = F64(scale.mV[VY]) * import_scale;
++        mParams["Lodestar Metric Z"] = F64(scale.mV[VZ]) * import_scale;
++        assignAnalyzeData(*mdl);
++    }
++    else
++    {
++        assignData(mdl);
++    }
++}
++
++void LLFloaterModelPreview::DecompRequest::assignAnalyzeData(const LLModel& model)
++{
++    for (S32 face_index = 0; face_index < model.getNumVolumeFaces(); ++face_index)
++    {
++        const LLVolumeFace& face = model.getVolumeFace(face_index);
++        if (face.mNumVertices < 0 || face.mNumIndices < 0 || face.mNumIndices % 3 != 0 ||
++            (face.mNumVertices > 0 && !face.mPositions) || (face.mNumIndices > 0 && !face.mIndices))
++        {
++            setStatusMessage("Lodestar: Invalid physics face.");
++            return;
++        }
++
++        const size_t offset = mPositions.size();
++        if (offset + static_cast<size_t>(face.mNumVertices) > U16_MAX)
++        {
++            setStatusMessage("Lodestar: A physics model exceeds the 65,535 vertex analysis limit.");
++            return;
++        }
++
++        for (S32 vertex = 0; vertex < face.mNumVertices; ++vertex)
++        {
++            const LLVector3 position(face.mPositions[vertex].getF32ptr());
++            if (!position.isFinite())
++            {
++                setStatusMessage("Lodestar: A physics model contains a non-finite position.");
++                return;
++            }
++            mPositions.push_back(position);
++        }
++
++        for (S32 index = 0; index < face.mNumIndices; ++index)
++        {
++            const U16 vertex = face.mIndices[index];
++            if (vertex >= face.mNumVertices)
++            {
++                setStatusMessage("Lodestar: A physics triangle has an out-of-range index.");
++                return;
++            }
++            mIndices.push_back(static_cast<U16>(offset + vertex));
++        }
++    }
++
++    if (mPositions.size() < 4 || mIndices.size() < 12)
++    {
++        setStatusMessage("Lodestar: A physics model needs at least four vertices and four triangles.");
++    }
+ }
+ 
+ void LLFloaterModelPreview::setCtrlLoadFromFile(S32 lod)
+@@ -2035,6 +2348,11 @@ void LLFloaterModelPreview::toggleCalculateButton(bool visible)
+ 
+ void LLFloaterModelPreview::onLoDSourceCommit(S32 lod)
+ {
++    if (getChild<LLComboBox>("lod_source_" + lod_name[lod])->getCurrentIndex() == LLModelPreview::LODESTAR_AUTO)
++    {
++        startLodestarPreparation(mLodestarSource.empty() ? mModelPreview->mLODFile[LLModel::LOD_HIGH] : mLodestarSource);
++        return;
++    }
+     mModelPreview->updateLodControls(lod);
+ 
+     LLComboBox* lod_source_combo = getChild<LLComboBox>("lod_source_" + lod_name[lod]);
+@@ -2091,7 +2409,7 @@ void LLFloaterModelPreview::resetUploadOptions()
+     getChild<LLComboBox>("lod_source_" + lod_name[NUM_LOD - 1])->setCurrentByIndex(LLModelPreview::LOD_FROM_FILE);
+     for (S32 lod = 0; lod < NUM_LOD - 1; ++lod)
+     {
+-        getChild<LLComboBox>("lod_source_" + lod_name[lod])->setCurrentByIndex(LLModelPreview::MESH_OPTIMIZER_AUTO);
++        getChild<LLComboBox>("lod_source_" + lod_name[lod])->setCurrentByIndex(LLModelPreview::LODESTAR_AUTO);
+         childSetValue("lod_file_" + lod_name[lod], "");
+     }
+ 
+@@ -2125,6 +2443,7 @@ void LLFloaterModelPreview::onModelPhysicsFeeReceived(const LLSD& result, std::s
+ 
+ void LLFloaterModelPreview::handleModelPhysicsFeeReceived()
+ {
++    mPhysicsFeePending = false;
+     const LLSD& result = mModelPhysicsFee;
+     mUploadModelUrl = result["url"].asString();
+ 
+@@ -2155,6 +2474,7 @@ void LLFloaterModelPreview::handleModelPhysicsFeeReceived()
+ 
+ void LLFloaterModelPreview::setModelPhysicsFeeErrorStatus(S32 status, const std::string& reason, const LLSD& result)
+ {
++    mPhysicsFeePending = false;
+     std::ostringstream out;
+     out << "LLFloaterModelPreview::setModelPhysicsFeeErrorStatus(" << status;
+     out << " : " << reason << ")";
+@@ -2191,10 +2511,11 @@ void LLFloaterModelPreview::onModelUploadFailure()
+ 
+ bool LLFloaterModelPreview::isModelUploadAllowed()
+ {
+-    bool allow_upload = mHasUploadPerm && !mUploadModelUrl.empty();
++    bool allow_upload = !mLodestarStage && !mLodestarBlocked && !mPhysicsFeePending && mAnalyzeRequests.empty() && mHasUploadPerm && !mUploadModelUrl.empty();
+     if (mModelPreview)
+     {
+-        allow_upload &= mModelPreview->mModelNoErrors;
++        allow_upload &= mModelPreview->mModelNoErrors && !mModelPreview->mLoading &&
++            mModelPreview->lodsReady() && mModelPreview->mLodsWithParsingError.empty();
+     }
+     return allow_upload;
+ }
+@@ -2203,6 +2524,16 @@ S32 LLFloaterModelPreview::DecompRequest::statusCallback(const char* status, S32
+ {
+     if (mContinue)
+     {
++        if (mStage == "Analyze")
++        {
++            const std::string message(status ? status : "");
++            if (message.compare(0, 10, "Lodestar: ") == 0)
++            {
++                setStatusMessage(message);
++            }
++            return mContinue;
++        }
++
+         setStatusMessage(llformat("%s: %d/%d", status, p1, p2));
+         if (LLFloaterModelPreview::sInstance)
+         {
+@@ -2215,6 +2546,15 @@ S32 LLFloaterModelPreview::DecompRequest::statusCallback(const char* status, S32
+ 
+ void LLFloaterModelPreview::DecompRequest::completed()
+ { //called from the main thread
++    if (mStage == "Analyze")
++    {
++        if (mContinue && sInstance)
++        {
++            sInstance->finishPhysicsAnalysis(this);
++        }
++        return;
++    }
++
+     if (mContinue)
+     {
+         mModel->setConvexHullDecomposition(mHull, mHullMesh);
+@@ -2272,6 +2612,7 @@ void LLFloaterModelPreview::setPermissonsErrorStatus(S32 status, const std::stri
+ 
+ bool LLFloaterModelPreview::isModelLoading()
+ {
++    if (mLodestarStage) return true;
+     if(mModelPreview)
+     {
+         return mModelPreview->mLoading;
+diff --git a/indra/newview/llfloatermodelpreview.h b/indra/newview/llfloatermodelpreview.h
+index 5a1d058817..858dfeaf92 100644
+--- a/indra/newview/llfloatermodelpreview.h
++++ b/indra/newview/llfloatermodelpreview.h
+@@ -27,9 +27,12 @@
+ #ifndef LL_LLFLOATERMODELPREVIEW_H
+ #define LL_LLFLOATERMODELPREVIEW_H
+ 
++#include <atomic>
++
+ #include "llfloaternamedesc.h"
+ #include "llfloatermodeluploadbase.h"
+ #include "llmeshrepository.h"
++#include "llprocess.h"
+ 
+ class LLComboBox;
+ class LLJoint;
+@@ -56,13 +59,15 @@ public:
+     class DecompRequest : public LLPhysicsDecomp::Request
+     {
+     public:
+-        S32 mContinue;
++        std::atomic<S32> mContinue{1};
+         LLPointer<LLModel> mModel;
+ 
+         DecompRequest(const std::string& stage, LLModel* mdl);
+         virtual S32 statusCallback(const char* status, S32 p1, S32 p2);
+         virtual void completed();
+ 
++    private:
++        void assignAnalyzeData(const LLModel& model);
+     };
+     static LLFloaterModelPreview* sInstance;
+ 
+@@ -205,6 +210,32 @@ protected:
+     LLSD mModelPhysicsFee;
+ 
+ private:
++    void startLodestarPreparation(const std::string& source);
++    void pollLodestarPreparation();
++    void loadLodestarPreparedLevel(S32 level);
++    void failLodestarPreparation(const std::string& message);
++    void setLodestarControlsEnabled(bool enabled);
++    LLProcessPtr mLodestarProcess;
++    std::string mLodestarSource;
++    std::string mLodestarOutput;
++    std::string mLodestarExpectedFile;
++    std::string mLodestarPhysicsFile;
++    LLSD mLodestarResult;
++    S32 mLodestarStage = 0;
++    S32 mLodestarImportLevel = -1;
++    bool mLodestarInternalLoad = false;
++    bool mLodestarBlocked = false;
++    bool mLodestarHullsSucceeded = false;
++    void reportPhysicsAnalysisFailure(const std::string& message);
++    void startPhysicsAnalysis();
++    void finishPhysicsAnalysis(DecompRequest* request);
++    void cancelPhysicsAnalysis();
++
++    std::vector<LLPointer<DecompRequest>> mAnalyzeRequests;
++    std::vector<LLPointer<LLModel>> mAnalyzeSource;
++    S32 mAnalyzeSourceLOD = -1;
++    bool mPhysicsFeePending = false;
++
+     void onClickCalculateBtn();
+     void onJointListSelection();
+ 
+diff --git a/indra/newview/llfloatermodelpreview_lodestar.inc b/indra/newview/llfloatermodelpreview_lodestar.inc
+new file mode 100644
+index 0000000000..4e5222402b
+--- /dev/null
++++ b/indra/newview/llfloatermodelpreview_lodestar.inc
+@@ -0,0 +1,309 @@
++// Local preparation orchestration. Surface mathematics run in lodestar_c.dll
++// through the development worker. Native viewer import and hull conversion
++// remain on the viewer thread. This fragment is included after class headers.
++
++static bool lodestarContainerSurfaceValid(LLModel& model)
++{
++    LLVector3 minimum(F32_MAX,F32_MAX,F32_MAX), maximum(-F32_MAX,-F32_MAX,-F32_MAX);
++    for (const auto& face : model.getVolumeFaces())
++        for (S32 v = 0; v < face.mNumVertices; ++v)
++            update_min_max(minimum, maximum, face.mPositions[v].getF32ptr());
++    for (S32 axis = 0; axis < 3; ++axis)
++        if (!llfinite(minimum[axis]) || !llfinite(maximum[axis]) || minimum[axis] < -.501f || maximum[axis] > .501f) return false;
++    const LLVector3 range = maximum-minimum;
++    const auto decode = [&](const LLVector4a& point) {
++        LLVector3 result;
++        for (S32 axis = 0; axis < 3; ++axis)
++        {
++            const U16 value = range[axis] > 0.f ? (U16)(((point[axis]-minimum[axis])/range[axis])*65535.f) : 0;
++            result[axis] = (F32(value)/65535.f)*range[axis]+minimum[axis];
++        }
++        return result;
++    };
++    for (const auto& face : model.getVolumeFaces())
++    {
++        if (face.mNumIndices % 3) return false;
++        for (S32 i = 0; i < face.mNumIndices; i += 3)
++        {
++            for (S32 c = 0; c < 3; ++c) if (face.mIndices[i+c] >= face.mNumVertices) return false;
++            const auto a = decode(face.mPositions[face.mIndices[i]]);
++            const auto b = decode(face.mPositions[face.mIndices[i+1]]);
++            const auto c = decode(face.mPositions[face.mIndices[i+2]]);
++            const auto area = (b-a)%(c-a);
++            if (area[0] == 0.f && area[1] == 0.f && area[2] == 0.f) return false;
++        }
++    }
++    return true;
++}
++
++void LLFloaterModelPreview::setLodestarControlsEnabled(bool enabled)
++{
++    for (S32 lod = 0; lod <= LLModel::LOD_HIGH; ++lod)
++    {
++        for (const auto* prefix : {"lod_source_", "lod_browse_", "lod_mode_", "lod_triangle_limit_", "lod_error_threshold_"})
++            getChildView(std::string(prefix) + lod_name[lod])->setEnabled(enabled);
++    }
++    for (const auto* name : {"gen_normals", "crease_angle", "reset_btn", "lodestar_prepare", "physics_lod_combo", "physics_browse", "import_scale"})
++    {
++        if (auto* control = findChildView(name)) control->setEnabled(enabled);
++    }
++}
++
++void LLFloaterModelPreview::failLodestarPreparation(const std::string& message)
++{
++    mLodestarProcess.reset();
++    mLodestarStage = 0;
++    mLodestarBlocked = true;
++    setLodestarControlsEnabled(true);
++    addStringToLog(message, true);
++    getChild<LLTextBox>("lodestar_preparation_summary")->setText(message);
++    LLSD args;
++    args["MESSAGE"] = message;
++    LLNotificationsUtil::add("GenericAlert", args);
++}
++
++void LLFloaterModelPreview::startLodestarPreparation(const std::string& source)
++{
++    if (mLodestarStage || !mAnalyzeRequests.empty() || mPhysicsFeePending || !mModelPreview || mModelPreview->mLoading)
++    {
++        addStringToLog("Lodestar: Finish the current preparation or import before starting another.", true);
++        return;
++    }
++    if (source.empty() || !LLFile::isfile(source))
++    {
++        failLodestarPreparation("Lodestar: Select the authoritative High source file first.");
++        return;
++    }
++    LLSD config;
++    llifstream settings(gDirUtilp->getExpandedFilename(LL_PATH_APP_SETTINGS, "lodestar-preparation.xml"));
++    if (!settings || LLSDSerialize::fromXML(config, settings) <= 0 ||
++        !LLFile::isfile(config["python"].asString()) || !LLFile::isfile(config["worker"].asString()))
++    {
++        failLodestarPreparation("Lodestar: The local preparation runtime is missing. Install lodestar-preparation.xml with the Python runtime and worker paths.");
++        return;
++    }
++    mLodestarSource = source;
++    mLodestarOutput = gDirUtilp->getTempFilename();
++    mLodestarExpectedFile.clear();
++    mLodestarResult.clear();
++    mLodestarBlocked = true;
++    mLodestarHullsSucceeded = false;
++    mUploadModelUrl.clear();
++    mModelPhysicsFee.clear();
++    mModelPreview->mGenLOD = false;
++    mModelPreview->mLodsQuery.clear();
++    mModelPreview->mLodsWithParsingError.clear();
++    mModelPreview->mLookUpLodFiles = false;
++    LLProcess::Params parameters;
++    parameters.executable = config["python"].asString();
++    parameters.args.add(config["worker"].asString());
++    parameters.args.add(source);
++    parameters.args.add(mLodestarOutput);
++    parameters.args.add("--library");
++    parameters.args.add(gDirUtilp->add(gDirUtilp->getExecutableDir(), "lodestar_c.dll"));
++    parameters.args.add("--import-scale");
++    parameters.args.add(llformat("%.17g", childGetValue("import_scale").asReal()));
++    parameters.autokill = true;
++    parameters.desc = "Lodestar automatic LOD and collision preparation";
++    mLodestarProcess = LLProcess::create(parameters);
++    if (!mLodestarProcess)
++    {
++        failLodestarPreparation("Lodestar: Could not start the local preparation worker.");
++        return;
++    }
++    mLodestarStage = 1;
++    setLodestarControlsEnabled(false);
++    openFloater();
++    const auto preparation_handle = getHandle();
++    doOnIdleRepeating([preparation_handle]()
++    {
++        auto* preparation = dynamic_cast<LLFloaterModelPreview*>(preparation_handle.get());
++        if (!preparation) return true;
++        preparation->pollLodestarPreparation();
++        return preparation->mLodestarStage == 0;
++    });
++    const std::string message = "Lodestar is calculating all visual LODs and correcting collision surfaces from High...";
++    getChild<LLTextBox>("lodestar_preparation_summary")->setText(message);
++    addStringToLog(message, false);
++}
++
++void LLFloaterModelPreview::loadLodestarPreparedLevel(S32 level)
++{
++    static const char* files[] = {"Lodestar_LOD0.dae", "Lodestar_LOD1.dae", "Lodestar_LOD2.dae", "Lodestar.dae"};
++    mLodestarImportLevel = level;
++    mLodestarExpectedFile = gDirUtilp->add(mLodestarOutput,
++        level == LLModel::LOD_PHYSICS ? mLodestarPhysicsFile : files[level]);
++    if (level == LLModel::LOD_PHYSICS) setCtrlLoadFromFile(level);
++    mLodestarInternalLoad = true;
++    mModelPreview->mLoading = true;
++    mModelPreview->loadModel(mLodestarExpectedFile, level, true);
++    mLodestarInternalLoad = false;
++}
++
++void LLFloaterModelPreview::pollLodestarPreparation()
++{
++    if (!mLodestarStage || !mModelPreview) return;
++    if (mLodestarStage == 1)
++    {
++        if (mLodestarProcess && mLodestarProcess->isRunning()) return;
++        const auto process_status = LLProcess::getStatus(mLodestarProcess);
++        mLodestarProcess.reset();
++        llifstream result_file(gDirUtilp->add(mLodestarOutput, "viewer-result.xml"));
++        const bool parsed = result_file && LLSDSerialize::fromXML(mLodestarResult, result_file) > 0;
++        if (process_status.mState != LLProcess::EXITED || process_status.mData != 0 || !parsed ||
++            mLodestarResult["status"].asString() != "prepared")
++        {
++            failLodestarPreparation(mLodestarResult["message"].asString().empty() ?
++                "Lodestar preparation failed. Inspect preparation.log in " + mLodestarOutput :
++                mLodestarResult["message"].asString());
++            return;
++        }
++        if (mLodestarResult["size_container_required"].asBoolean())
++        {
++            failLodestarPreparation(llformat("Lodestar proposed size containers for %d tiny models. Review size-proposals.json in ",
++                mLodestarResult["size_container_count"].asInteger()) + mLodestarOutput);
++            return;
++        }
++        mLodestarPhysicsFile = mLodestarResult["physics_file"].asString();
++        if (mLodestarPhysicsFile != "Lodestar_PHYS.dae" && mLodestarPhysicsFile != "Lodestar_unresolved_PHYS.dae")
++        {
++            failLodestarPreparation("Lodestar returned an invalid physics companion name.");
++            return;
++        }
++        for (S32 lod = 0; lod <= LLModel::LOD_HIGH; ++lod)
++        {
++            mLODMode[lod] = LLModelPreview::LOD_FROM_FILE;
++            getChild<LLComboBox>("lod_source_" + lod_name[lod])->setCurrentByIndex(LLModelPreview::LOD_FROM_FILE);
++        }
++        addStringToLog(llformat("Lodestar calculated High/Medium/Low/Lowest: %d / %d / %d / %d triangles.",
++            mLodestarResult["high_triangles"].asInteger(), mLodestarResult["medium_triangles"].asInteger(),
++            mLodestarResult["low_triangles"].asInteger(), mLodestarResult["lowest_triangles"].asInteger()), false);
++        addStringToLog(llformat("Lodestar collision basis: %s. Surface deviation bound against High: %.6g m before upload packing.",
++            mLodestarResult["physics_source_level"].asString().c_str(),
++            mLodestarResult["physics_surface_bound"].asReal()), false);
++        if (mLodestarResult["physical_container_count"].asInteger() > 0)
++            addStringToLog(llformat("Lodestar applied %d physical container boxes. Visual dimensions retained at import scale %.6g.",
++                mLodestarResult["physical_container_count"].asInteger(),
++                mLodestarResult["physical_container_import_scale"].asReal()), false);
++        mLodestarStage = 2;
++        loadLodestarPreparedLevel(LLModel::LOD_HIGH);
++        return;
++    }
++    if (mModelPreview->mLoading || mModelPreview->mModelLoader) return;
++    if (mLodestarStage == 2 || mLodestarStage == 4 || mLodestarStage == 5)
++    {
++        if (mModelPreview->mLODFile[mLodestarImportLevel] != mLodestarExpectedFile ||
++            mModelPreview->mModel[mLodestarImportLevel].empty() || !mModelPreview->mLodsWithParsingError.empty())
++        {
++            failLodestarPreparation("Lodestar: Native viewer import failed. The generated package remains blocked.");
++            return;
++        }
++        const S32 expected_containers = mLodestarResult["physical_container_count"].asInteger();
++        if (expected_containers > 0)
++        {
++            if (fabs(mLodestarResult["physical_container_import_scale"].asReal()-childGetValue("import_scale").asReal()) > 1e-10)
++            {
++                failLodestarPreparation("Lodestar: Import scale changed during preparation. Prepare again to recalculate the physical containers.");
++                return;
++            }
++            const auto& models = mModelPreview->mModel[mLodestarImportLevel];
++            const auto imported_containers = std::count_if(models.begin(), models.end(), [](const auto& model) {
++                return model && !model->mSubmodelID && model->mLodestarPhysicalContainer;
++            });
++            if (imported_containers != expected_containers)
++            {
++                failLodestarPreparation("Lodestar: Native import did not retain every physical container frame. Upload blocked to preserve authored scale.");
++                return;
++            }
++            if (mLodestarImportLevel != LLModel::LOD_PHYSICS)
++                for (const auto& model : models)
++                    if (model && model->mLodestarPhysicalContainer && !lodestarContainerSurfaceValid(*model.get()))
++                    {
++                        failLodestarPreparation("Lodestar: A physical frame produces invalid packed visual geometry. Upload blocked; source surface retained.");
++                        return;
++                    }
++        }
++        if (mLodestarStage == 2 && mLodestarImportLevel > LLModel::LOD_IMPOSTOR)
++        {
++            loadLodestarPreparedLevel(mLodestarImportLevel - 1);
++            return;
++        }
++        for (S32 lod = 0; lod < LLModel::LOD_HIGH; ++lod)
++        {
++            mLODMode[lod] = LLModelPreview::LODESTAR_AUTO;
++            getChild<LLComboBox>("lod_source_" + lod_name[lod])->setCurrentByIndex(LLModelPreview::LODESTAR_AUTO);
++            mModelPreview->updateLodControls(lod);
++        }
++        if (mLodestarStage == 2)
++        {
++            mModelPreview->setPreviewLOD(LLModel::LOD_HIGH);
++            mLodestarStage = 5;
++            loadLodestarPreparedLevel(LLModel::LOD_PHYSICS);
++            return;
++        }
++        if (mLodestarStage == 5)
++        {
++            mLodestarStage = 3;
++            mDecompParams["Num Hulls"] = 256;
++            getChild<LLSpinCtrl>("Num Hulls")->setValue(LLSD(256));
++            startPhysicsAnalysis();
++            return;
++        }
++        mModelPreview->rebuildUploadData();
++        mModelPreview->updateStatusMessages();
++        mLodestarStage = 0;
++        setLodestarControlsEnabled(true);
++        mLodestarBlocked = !mLodestarResult["triangle_ready"].asBoolean() ||
++            !mModelPreview->mModelNoErrors || mModelPreview->mHasDegenerate;
++        std::string message = "Lodestar LODs calculated. Native triangle physics validation passed; hull conversion was unavailable.";
++        if (mLodestarBlocked)
++        {
++            const auto unresolved = mLodestarResult["unresolved_triangles"].asInteger();
++            const auto* physics_status = getChild<LLTextBox>("physics_status_message_text");
++            if (mModelPreview->mHasDegenerate)
++            {
++                message = "Lodestar: Native physics import found degenerate triangles. See Physics/Log.";
++            }
++            else if (unresolved > 0)
++            {
++                message = llformat("Lodestar LODs calculated. Physics blocked. Remaining triangle failures: %d. See Physics/Log.", unresolved);
++            }
++            else if (mLodestarResult["triangle_ready"].asBoolean() && physics_status->getVisible() &&
++                     physics_status->getText() == getString("phys_status_too_thin"))
++            {
++                message = "Lodestar triangles passed. Instances below 0.5 m require supported hulls.";
++            }
++            else
++            {
++                message = "Lodestar preparation is blocked by native model validation. See Physics/Log.";
++            }
++            if (physics_status->getVisible() && !physics_status->getText().empty())
++            {
++                addStringToLog("Lodestar native physics blocker: " + physics_status->getText(), true);
++            }
++        }
++        getChild<LLTextBox>("lodestar_preparation_summary")->setText(message);
++        addStringToLog(message, mLodestarBlocked);
++        return;
++    }
++    if (mLodestarStage == 3 && mAnalyzeRequests.empty())
++    {
++        if (mLodestarHullsSucceeded)
++        {
++            mModelPreview->rebuildUploadData();
++            mModelPreview->updateStatusMessages();
++            mLodestarStage = 0;
++            setLodestarControlsEnabled(true);
++            mLodestarBlocked = !mModelPreview->mModelNoErrors;
++            const std::string message = mLodestarBlocked ? "Lodestar: Native upload validation is blocked." :
++                "Lodestar collision prepared. Native viewer checks passed.";
++            getChild<LLTextBox>("lodestar_preparation_summary")->setText(message);
++            addStringToLog(message, mLodestarBlocked);
++        }
++        else
++        {
++            mLodestarStage = 4;
++            loadLodestarPreparedLevel(LLModel::LOD_PHYSICS);
++        }
++    }
++}
+diff --git a/indra/newview/llmeshrepository.cpp b/indra/newview/llmeshrepository.cpp
+index eb0be3511a..6aec0b59e8 100644
+--- a/indra/newview/llmeshrepository.cpp
++++ b/indra/newview/llmeshrepository.cpp
+@@ -3174,17 +3174,9 @@ void LLMeshUploadThread::generateHulls()
+         {
+             physics = data.mModel[LLModel::LOD_PHYSICS];
+         }
+-        else if (data.mModel[LLModel::LOD_LOW].notNull())
+-        {
+-            physics = data.mModel[LLModel::LOD_LOW];
+-        }
+-        else if (data.mModel[LLModel::LOD_MEDIUM].notNull())
+-        {
+-            physics = data.mModel[LLModel::LOD_MEDIUM];
+-        }
+         else
+         {
+-            physics = data.mModel[LLModel::LOD_HIGH];
++            physics = data.mBaseModel;
+         }
+ 
+         llassert(physics != NULL);
+@@ -5901,6 +5893,15 @@ void LLPhysicsDecomp::doDecomposition()
+         const std::string& name = iter->first;
+         const LLSD& value = iter->second;
+ 
++        // Metric conversion belongs to the request, not to the uploader's
++        // editable decomposition parameters. Preserve physical distances
++        // through the native model's nonuniform normalization.
++        if (name == "Lodestar Metric X" || name == "Lodestar Metric Y" || name == "Lodestar Metric Z")
++        {
++            ret = LLConvexDecomposition::getInstance()->setParam(name.c_str(), F32(value.asReal()));
++            continue;
++        }
++
+         const LLCDParam* param = param_map[name];
+ 
+         if (param == NULL)
+@@ -5940,7 +5941,10 @@ void LLPhysicsDecomp::doDecomposition()
+         mCurRequest->mHull.clear();
+         mCurRequest->mHullMesh.clear();
+ 
+-        mCurRequest->setStatusMessage("FAIL");
++        if (mCurRequest->mStatusMessage.rfind("Lodestar: ", 0) != 0)
++        {
++            mCurRequest->setStatusMessage("FAIL");
++        }
+ 
+         completeCurrent();
+     }
+diff --git a/indra/newview/llmodelpreview.cpp b/indra/newview/llmodelpreview.cpp
+index 1964ba574f..d64aaf6864 100644
+--- a/indra/newview/llmodelpreview.cpp
++++ b/indra/newview/llmodelpreview.cpp
+@@ -474,6 +474,13 @@ void LLModelPreview::rebuildUploadData()
+     mUploadData.clear();
+     mTextureSet.clear();
+ 
++    if (mPhysicsSearchLOD == LLModel::LOD_HIGH && mModel[LLModel::LOD_PHYSICS] != mBaseModel)
++    {
++        mModel[LLModel::LOD_PHYSICS] = mBaseModel;
++        mScene[LLModel::LOD_PHYSICS] = mBaseScene;
++        mVertexBuffer[LLModel::LOD_PHYSICS].clear();
++    }
++
+     //fill uploaddata instance vectors from scene data
+ 
+     std::string requested_name = mFMP->getChild<LLUICtrl>("description_form")->getValue().asString();
+@@ -520,6 +527,15 @@ void LLModelPreview::rebuildUploadData()
+ 
+             for (int i = LLModel::NUM_LODS - 1; i >= LLModel::LOD_IMPOSTOR; i--)
+             {
++                if (i == LLModel::LOD_PHYSICS)
++                {
++                    instance.mLOD[i] = nullptr;
++                    if (mPhysicsSearchLOD == LLModel::LOD_HIGH)
++                    {
++                        instance.mLOD[i] = base_model;
++                        continue;
++                    }
++                }
+                 LLModel* lod_model = NULL;
+                 if (!legacyMatching)
+                 {
+@@ -978,6 +994,18 @@ void LLModelPreview::loadModel(std::string filename, S32 lod, bool force_disable
+ {
+     assert_main_thread();
+ 
++    auto* preparation = static_cast<LLFloaterModelPreview*>(mFMP);
++    if (preparation && !preparation->mLodestarInternalLoad && !filename.empty() &&
++        (lod == LLModel::LOD_HIGH || preparation->mLodestarStage))
++    {
++        if (!mModelLoader) mLoading = false; // File picker sets this before choosing a file.
++        if (lod == LLModel::LOD_HIGH && !preparation->mLodestarStage)
++            preparation->startLodestarPreparation(filename);
++        else
++            LLFloaterModelPreview::addStringToLog("Lodestar: Wait for automatic preparation to finish before changing sources.", true);
++        return;
++    }
++
+     LLMutexLock lock(this);
+ 
+     if (lod < LLModel::LOD_IMPOSTOR || lod > LLModel::NUM_LODS - 1)
+@@ -1133,8 +1161,8 @@ void LLModelPreview::setPhysicsFromLOD(S32 lod)
+     if (lod >= 0 && lod <= 3)
+     {
+         mPhysicsSearchLOD = lod;
+-        mModel[LLModel::LOD_PHYSICS] = mModel[lod];
+-        mScene[LLModel::LOD_PHYSICS] = mScene[lod];
++        mModel[LLModel::LOD_PHYSICS] = lod == LLModel::LOD_HIGH ? mBaseModel : mModel[lod];
++        mScene[LLModel::LOD_PHYSICS] = lod == LLModel::LOD_HIGH ? mBaseScene : mScene[lod];
+         mLODFile[LLModel::LOD_PHYSICS].clear();
+         mFMP->childSetValue("physics_file", mLODFile[LLModel::LOD_PHYSICS]);
+         mVertexBuffer[LLModel::LOD_PHYSICS].clear();
+@@ -1440,10 +1468,10 @@ void LLModelPreview::loadModelCallback(S32 loaded_lod)
+ 
+         if (loaded_lod == LLModel::LOD_HIGH)
+         { //save a copy of the highest LOD for automatic LOD manipulation
+-            if (mBaseModel.empty())
+-            { //first time we've loaded a model, auto-gen LoD
+-                mGenLOD = true;
+-            }
++            // Lodestar imports all calculated levels explicitly. The stock
++            // first-load meshoptimizer query would overwrite those results.
++            mGenLOD = false;
++            mLodsQuery.clear();
+ 
+             mBaseModel = mModel[loaded_lod];
+             clearGLODGroup(); // <FS:Beq/> Improved LOD generation
+@@ -1455,6 +1483,7 @@ void LLModelPreview::loadModelCallback(S32 loaded_lod)
+         {
+             if (loaded_lod == LLModel::LOD_PHYSICS)
+             {   // Explicitly loading physics. See if there is a default mesh.
++                mPhysicsSearchLOD = LLModel::LOD_PHYSICS;
+                 LLMatrix4 ignored_transform; // Each mesh that uses this will supply their own.
+                 LLModel* out_model = nullptr;
+                 FindModel(mScene[loaded_lod], DEFAULT_PHYSICS_MESH_NAME + getLodSuffix(loaded_lod), out_model, ignored_transform);
+@@ -3155,16 +3184,36 @@ void LLModelPreview::updateStatusMessages()
+         mMaxTriangleLimit = total_tris[LLModel::LOD_HIGH];
+     }
+ 
+-// <FS:Beq> fIRE-31602 thin mesh physics warning
+-    static const float CONVEXIFICATION_SIZE_MESH {0.5};
+-    auto smallest_axis = llmin(mPreviewScale.mV[0], mPreviewScale.mV[1]);
+-    smallest_axis = llmin(smallest_axis, mPreviewScale.mV[2]);
+-    smallest_axis *= 2.f;
+-    if (smallest_axis < CONVEXIFICATION_SIZE_MESH)
++    constexpr F32 minimum_triangle_physics_size = 0.5f;
++    std::map<const LLModel*, bool> serialized_triangle_physics;
++    for (const LLModelInstance& instance : mUploadData)
+     {
+-        has_physics_error |= PhysicsError::TOOTHIN;
++        const LLModel* base_model = instance.mModel.get();
++        if (!base_model || base_model->mSubmodelID)
++        {
++            continue;
++        }
++
++        // Upload serializes the first instance's physics mesh for each shared model.
++        const auto& physics = instance.mLOD[LLModel::LOD_PHYSICS];
++        const bool uses_triangle_block = serialized_triangle_physics.try_emplace(
++            base_model, physics.notNull() && physics->mPhysics.mHull.empty()).first->second;
++        if (!uses_triangle_block || physics.isNull())
++        {
++            continue;
++        }
++
++        // The basis lengths give the uploaded dimensions, including import scale.
++        const auto& matrix = instance.mTransform.mMatrix;
++        const F32 smallest_axis = std::min({LLVector3(matrix[VX]).magVec(),
++                                           LLVector3(matrix[VY]).magVec(),
++                                           LLVector3(matrix[VZ]).magVec()});
++        if (smallest_axis < minimum_triangle_physics_size)
++        {
++            has_physics_error |= PhysicsError::TOOTHIN;
++            break;
++        }
+     }
+-// </FS:Beq<
+ 
+     mHasDegenerate = false;
+     {//check for degenerate triangles in physics mesh
+@@ -3479,6 +3528,8 @@ void LLModelPreview::updateStatusMessages()
+         }
+     }
+ 
++    // Physics validity is part of readiness, including the later fee gate.
++    mModelNoErrors &= (has_physics_error <= PhysicsError::NOHAVOK);
+     // <FS:Beq> Improve the error checking the TO DO here is no longer applicable but not an FS comment so edited to stop it being picked up
+     //if (!mModelNoErrors || mHasDegenerate)
+     if (!gSavedSettings.getBOOL("FSIgnoreClientsideMeshValidation") && (!mModelNoErrors || (has_physics_error > PhysicsError::NOHAVOK))) // block for all cases of phsyics error except NOHAVOK
+@@ -3755,6 +3806,14 @@ void LLModelPreview::updateLodControls(S32 lod)
+             mFMP->childSetVisible(lod_controls[i] + lod_name[lod], false);
+         }
+     }
++    else if (lod_mode == LODESTAR_AUTO)
++    {
++        fmp->mLODMode[lod] = LODESTAR_AUTO;
++        for (U32 i = 0; i < num_lod_controls; ++i)
++            mFMP->childSetVisible(lod_controls[i] + lod_name[lod], false);
++        mFMP->childSetVisible("lod_browse_" + lod_name[lod], false);
++        mFMP->childSetVisible("lod_file_" + lod_name[lod], true);
++    }
+     else if (lod_mode == USE_LOD_ABOVE) // use LoD above
+     {
+         fmp->mLODMode[lod] = USE_LOD_ABOVE;
+@@ -4167,6 +4226,12 @@ void LLModelPreview::lookupLODModelFiles(S32 lod)
+     if (lod == LLModel::LOD_PHYSICS)
+     {
+         mLookUpLodFiles = false;
++        auto* source = mFMP->getChild<LLComboBox>("physics_lod_combo");
++        if (source->getCurrentIndex() == 0 && !mBaseModel.empty())
++        {
++            source->setCurrentByIndex(1); // High
++            setPhysicsFromLOD(LLModel::LOD_HIGH);
++        }
+         return;
+     }
+     S32 next_lod = (lod - 1 >= LLModel::LOD_IMPOSTOR) ? lod - 1 : LLModel::LOD_PHYSICS;
+@@ -5256,6 +5321,12 @@ bool LLModelPreview::lodQueryCallback()
+             S32 lod = preview->mLodsQuery.back();
+             preview->mLodsQuery.pop_back();
+ // <FS:Beq> Improved LOD generation
++            if (preview->mFMP->getChild<LLComboBox>("lod_source_" + lod_name[lod])->getCurrentIndex() == LODESTAR_AUTO)
++            {
++                fmp->startLodestarPreparation(fmp->mLodestarSource.empty() ? preview->mLODFile[LLModel::LOD_HIGH] : fmp->mLodestarSource);
++                preview->mLodsQuery.clear();
++                return true;
++            }
+             static LLCachedControl<bool> default_to_glod(gSavedSettings, "FSMeshUploadUseGLODAsDefault");
+             if (default_to_glod())
+             {
+diff --git a/indra/newview/llmodelpreview.h b/indra/newview/llmodelpreview.h
+index 3b746bd768..e94c7354a4 100644
+--- a/indra/newview/llmodelpreview.h
++++ b/indra/newview/llmodelpreview.h
+@@ -130,6 +130,7 @@ public:
+         MESH_OPTIMIZER_SLOPPY, // uses sloppy method, works per face
+         GENERATE, // Use GLOD <FS:Beq/> Improved LOD generation
+         USE_LOD_ABOVE,
++        LODESTAR_AUTO,
+     } eLoDMode;
+ 
+     typedef enum
+diff --git a/indra/newview/skins/default/xui/en/floater_model_preview.xml b/indra/newview/skins/default/xui/en/floater_model_preview.xml
+index 8743f3cf2c..6ad1d30eea 100644
+--- a/indra/newview/skins/default/xui/en/floater_model_preview.xml
++++ b/indra/newview/skins/default/xui/en/floater_model_preview.xml
+@@ -34,7 +34,7 @@
+   <string name="mesh_status_invalid_material_list">LOD materials are not a subset of reference model.</string>
+   <string name="phys_status_vertex_limit_exceeded">Some physical hulls exceed the vertex limit (256); try an alternative 'Analyze Method'.</string>
+   <string name="phys_status_hull_limit_exceeded">Some models exceed the hull limit (256); try 'simplify'.</string>
+-  <string name="phys_status_degenerate_triangles">The physics mesh is too dense or contains degenerate triangles. Use Analyze/Simplify to resolve.</string>
++  <string name="phys_status_degenerate_triangles">Physics triangles failed validation. Analyze can build hulls for supported closed surfaces. See Log for analysis results.</string>
+   <string name="phys_status_too_thin">One or more dimensions is less than 0.5m, only hull-based (analyzed) physics shapes will work correctly.</string>
+   <string name="phys_status_unknown_error">An unrecognized error was detected.</string>
+   <string name="layer_all">All</string> <!-- Text to display in physics layer combo box for "all layers" -->
+@@ -375,6 +375,7 @@
+                  name="Use LoD above"
+                  label="Use LoD above"
+                  value="Use LoD above" />
++                <item name="Lodestar Auto" label="Lodestar Auto" value="Lodestar Auto" />
+             </combo_box>
+             <line_editor
+              follows="left|top"
+@@ -520,6 +521,7 @@
+                  name="Use LoD above"
+                  label="Use LoD above"
+                  value="Use LoD above" />
++                <item name="Lodestar Auto" label="Lodestar Auto" value="Lodestar Auto" />
+             </combo_box>
+             <line_editor
+              follows="left|top"
+@@ -665,6 +667,7 @@
+                  name="Use LoD above"
+                  label="Use LoD above"
+                  value="Use LoD above" />
++                <item name="Lodestar Auto" label="Lodestar Auto" value="Lodestar Auto" />
+             </combo_box>
+             <line_editor
+              follows="left|top"
+@@ -822,6 +825,12 @@
+              name="crease_angle"
+              value="75"
+              width="60" />
++            <button follows="top|left" height="20" layout="topleft" left="10"
++              top="274" width="180" name="lodestar_prepare" label="Prepare with Lodestar" />
++            <text follows="top|left" height="32" layout="topleft" left="200"
++              top="270" width="410" name="lodestar_preparation_summary" word_wrap="true">
++              Lodestar calculates all LODs and collision geometry from High.
++            </text>
+         </panel>
+       <!-- PHYSYCS PANEL -->
+         <panel
+@@ -1023,92 +1032,37 @@
+                       name="method_label"
+                       text_color="White"
+                       top_pad="0">
+-                      Step 2: Convert to hulls (optional)
+-                    </text>
+-                    <text
+-                      follows="top|left"
+-                      height="15"
+-                      layout="topleft"
+-                      name="fill_mode_label"
+-                      top_pad="10"
+-                      width="100">
+-                      Fill Mode:
+-                    </text>
+-                    <text
+-                      follows="top|left"
+-                      height="15"
+-                      name="resolution_label"
+-                      layout="topleft"
+-                      left_pad="5"
+-                      width="85">
+-                      Resolution:
++                      Step 2: Convert to hulls with Lodestar (optional)
+                     </text>
+                     <text
+                       follows="top|left"
+                       height="15"
+                       name="hulls_per_mesh_label"
+                       layout="topleft"
+-                      left_pad="25"
++                      left="0"
++                      top_pad="10"
+                       width="95">
+-                      Hulls per Mesh:
++                      Max hulls per mesh:
+                     </text>
+                     <text
+                       follows="top|left"
+                       height="15"
+                       name="vertices_per_hull_label"
+                       layout="topleft"
+-                      left_pad="5"
+-                      width="95">
+-                      Vertices per hull:
+-                    </text>
+-                    <text
+-                      follows="top|left"
+-                      height="15"
+-                      name="tolerance_label"
+-                      layout="topleft"
+-                      left_pad="5"
+-                      width="100">
+-                      Error tolerance:
++                      left_pad="25"
++                      width="190">
++                      Vertices per hull: Automatic
+                     </text>
+-                    <combo_box
+-                      follows="top|left"
+-                      layout="topleft"
+-                      left="0"
+-                      name="Fill Mode"
+-                      top_pad="0"
+-                      height="20"
+-                      width="100"/>
+-                    <combo_box
+-                      follows="top|left"
+-                      layout="topleft"
+-                      left_pad="5"
+-                      name="Voxel Resolution"
+-                      height="20"
+-                      width="100"/>
+                     <spinner
+                       follows="top|left"
+                       name="Num Hulls"
+                       height="20"
+-                      left_pad="10"
+-                      width="60"
+-                      decimal_digits="0"
+-                      allow_digits_only="true"/>
+-                    <spinner
+-                      follows="top|left"
+-                      name="Num Vertices"
+-                      height="20"
+-                      left_pad="40"
++                      layout="topleft"
++                      left="0"
++                      top_pad="0"
+                       width="60"
+                       decimal_digits="0"
+                       allow_digits_only="true"/>
+-                    <spinner
+-                      follows="top|left"
+-                      name="Error Tolerance"
+-                      height="20"
+-                      left_pad="40"
+-                      width="60"
+-                      decimal_digits="4"
+-                      allow_digits_only="true"/>
+                     <button
+                       bottom="1"
+                       follows="top|right"
+@@ -1329,6 +1283,17 @@
+                       word_wrap="true"
+                       top_delta="3"/>
+                 </panel>
++            <text
++              follows="top|left"
++              height="70"
++              layout="topleft"
++              left="18"
++              name="lodestar_analysis_summary"
++              top="145"
++              width="589"
++              word_wrap="true">
++              Analyze converts supported closed surfaces to collision hulls.
++            </text>
+         </panel>
+       <!-- MODIFIERS PANEL -->
+      <panel
