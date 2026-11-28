@@ -1,4 +1,4 @@
-#include "mesh_metrics.hpp"
+#include <lodestar/mesh_metrics.hpp>
 
 #include <array>
 #include <cmath>

@@ -584,6 +584,14 @@ The C ABI exposes in-memory mesh creation through `lodestar_asset_analyze_mesh()
 
 Run the regression tests with `ctest --test-dir build -C Release --output-on-failure`. The planar test reduces a textured 32-triangle grid to 14 triangles and checks preserved boundaries, holes, material seams, winding, and vertex attributes. A split fan reduces from four triangles to two with supplied authored vertex identities and keeps four when those identities are unknown. Seam tests cover coupled edits and protected attribute breaks. The suite also checks fixed-boundary certification, sphere eligibility, exact fallback, and benchmark metrics.
 
+## Libraries and the LOD metric
+
+The code is split into four static libraries by role: `lodestar_common` (types, topology, sampled metrics and the
+certified LOD error metric), `lodestar_simplifier`, `lodestar_physics` and `lodestar_render` (the evaluation and
+preview renderer, never a live viewer renderer). Each specialised library depends only on `lodestar_common`.
+[docs/lod-metric.md](docs/lod-metric.md) describes the certified metric and the record a viewer stores, and
+[packaging/README.md](packaging/README.md) the `3p-lodestar-common` package.
+
 ## Geometry modes and scope
 
 Lodestar fits a sphere to the mesh vertices by least squares and reports the RMS and maximum radial residuals relative to the fitted radius. The analytic mode requires a valid fit, a maximum vertex residual under 1%, no UV coordinates, a consistently wound surface enclosing the fitted center, and a maximum inward deviation from the sphere of at most 10% of the radius across source triangle interiors and edges. It then tessellates the fitted sphere on the CPU at the requested quality.

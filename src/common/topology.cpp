@@ -1,4 +1,4 @@
-#include "topology.hpp"
+#include <lodestar/topology.hpp>
 
 #include <algorithm>
 #include <array>

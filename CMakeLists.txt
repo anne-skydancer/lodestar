@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
-project(Lodestar LANGUAGES C CXX)
+project(Lodestar VERSION 0.1.0 LANGUAGES C CXX)
+
+# Build only lodestar_common (glm and the standard library) and install it: the 3p-lodestar-common
+# package that the Vulkanstorm viewer links. See packaging/README.md.
+option(LODESTAR_COMMON_ONLY "Build only lodestar_common, for the 3p package" OFF)
+if(LODESTAR_COMMON_ONLY)
+    set(LODESTAR_BUILD_VIEWER OFF)
+    set(LODESTAR_COMMON_IMPORT OFF)
+endif()
 
 option(LODESTAR_BUILD_VIEWER "Build the Vulkan mesh viewer" ON)
 if(LODESTAR_BUILD_VIEWER)
@@ -21,35 +29,106 @@ set(ASSIMP_BUILD_GLTF_IMPORTER ON)
 FetchContent_Declare(assimp GIT_REPOSITORY https://github.com/assimp/assimp.git GIT_TAG v5.4.3 GIT_SHALLOW TRUE)
 FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TAG 1.0.1 GIT_SHALLOW TRUE)
 FetchContent_Declare(meshoptimizer GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git GIT_TAG v0.22 GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(assimp glm meshoptimizer)
-
-add_library(lodestar_core STATIC
-    src/boundary_budget.cpp
-    src/collision.cpp
-    src/convex_hull.cpp
-    src/geometry.cpp
-    src/lodestar.cpp
-    src/orthogonal_hulls.cpp
-    src/planar.cpp
-    src/seam.cpp
-    src/surface_calculus.cpp
-    src/surface_fit.cpp
-    src/surface_tessellation.cpp
-    src/topology.cpp
-)
-# Preserve operation order in the exact geometry predicates.
-if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    set_property(SOURCE src/seam.cpp src/convex_hull.cpp src/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
-elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
-    set_property(SOURCE src/seam.cpp src/convex_hull.cpp src/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
+if(LODESTAR_COMMON_ONLY)
+    FetchContent_MakeAvailable(glm)
+else()
+    FetchContent_MakeAvailable(assimp glm meshoptimizer)
 endif()
-add_library(Lodestar::core ALIAS lodestar_core)
-target_compile_features(lodestar_core PUBLIC cxx_std_20)
-set_target_properties(lodestar_core PROPERTIES CXX_EXTENSIONS OFF)
-target_include_directories(lodestar_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
-target_link_libraries(lodestar_core PUBLIC glm::glm PRIVATE assimp::assimp meshoptimizer)
 
-add_library(lodestar_c SHARED src/lodestar_c.cpp)
+# The libraries are split by role. Each specialised library depends only on lodestar_common and
+# none depends on another one. Public headers stay together in include/lodestar.
+option(LODESTAR_COMMON_IMPORT "Include the Assimp mesh importer (loadMesh) in lodestar_common" ON)
+
+function(lodestar_library target)
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "ALIAS" "SOURCES")
+    add_library(${target} STATIC ${ARG_SOURCES})
+    add_library(${ARG_ALIAS} ALIAS ${target})
+    target_compile_features(${target} PUBLIC cxx_std_20)
+    set_target_properties(${target} PROPERTIES CXX_EXTENSIONS OFF)
+    target_include_directories(${target} PUBLIC
+        "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+        "$<INSTALL_INTERFACE:include>")
+endfunction()
+
+# lodestar_common: shared types, topology, the sampled metrics (test oracles) and the certified
+# LOD error metric. Dependencies: glm and the standard library only (Assimp only for the optional
+# importer). Strict floating point, so records agree across platforms.
+lodestar_library(lodestar_common ALIAS Lodestar::common SOURCES
+    src/common/mesh_metrics.cpp
+    src/common/metric_geometry.cpp
+    src/common/metric_rigged.cpp
+    src/common/metric_shading.cpp
+    src/common/metric_shape.cpp
+    src/common/metric_texture.cpp
+    src/common/record.cpp
+    src/common/silhouette_metrics.cpp
+    src/common/topology.cpp
+)
+if(LODESTAR_COMMON_IMPORT)
+    target_sources(lodestar_common PRIVATE src/common/mesh_import.cpp)
+    target_link_libraries(lodestar_common PRIVATE assimp::assimp)
+endif()
+target_link_libraries(lodestar_common PUBLIC glm::glm)
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    target_compile_options(lodestar_common PRIVATE /fp:strict)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+    target_compile_options(lodestar_common PRIVATE -fno-fast-math -ffp-contract=off)
+endif()
+
+if(LODESTAR_COMMON_ONLY)
+    include(GNUInstallDirs)
+    install(TARGETS lodestar_common ARCHIVE DESTINATION lib COMPONENT common)
+    install(FILES
+        include/lodestar/lodestar.hpp
+        include/lodestar/surface_calculus.hpp
+        include/lodestar/record.hpp
+        include/lodestar/metric.hpp
+        include/lodestar/mesh_metrics.hpp
+        include/lodestar/silhouette_metrics.hpp
+        include/lodestar/topology.hpp
+        DESTINATION include/lodestar COMPONENT common)
+    install(FILES LICENSE DESTINATION LICENSES RENAME lodestar-common.txt COMPONENT common)
+    return()
+endif()
+
+# lodestar_simplifier: LOD generation and analysis (meshoptimizer, planar, seam, surface fit).
+lodestar_library(lodestar_simplifier ALIAS Lodestar::simplifier SOURCES
+    src/simplifier/boundary_budget.cpp
+    src/simplifier/geometry.cpp
+    src/simplifier/lodestar.cpp
+    src/simplifier/planar.cpp
+    src/simplifier/seam.cpp
+    src/simplifier/surface_calculus.cpp
+    src/simplifier/surface_fit.cpp
+    src/simplifier/surface_tessellation.cpp
+)
+target_link_libraries(lodestar_simplifier PUBLIC lodestar_common PRIVATE meshoptimizer)
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set_property(SOURCE src/simplifier/seam.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+    set_property(SOURCE src/simplifier/seam.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
+endif()
+
+# lodestar_physics: collision meshes and convex hulls.
+lodestar_library(lodestar_physics ALIAS Lodestar::physics SOURCES
+    src/physics/collision.cpp
+    src/physics/convex_hull.cpp
+    src/physics/geometry_reduction.cpp
+    src/physics/orthogonal_hulls.cpp
+)
+target_link_libraries(lodestar_physics PUBLIC lodestar_common PRIVATE meshoptimizer)
+if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+    set_property(SOURCE src/physics/convex_hull.cpp src/physics/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS /fp:strict)
+elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
+    set_property(SOURCE src/physics/convex_hull.cpp src/physics/orthogonal_hulls.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-fast-math -ffp-contract=off)
+endif()
+
+# Umbrella for the existing apps, tests and the C ABI: everything except the preview renderer.
+add_library(lodestar_core INTERFACE)
+add_library(Lodestar::core ALIAS lodestar_core)
+target_link_libraries(lodestar_core INTERFACE lodestar_common lodestar_simplifier lodestar_physics)
+
+add_library(lodestar_c SHARED src/c_api/lodestar_c.cpp)
 set_target_properties(lodestar_c PROPERTIES CXX_EXTENSIONS OFF DEFINE_SYMBOL LODESTAR_C_EXPORTS)
 target_include_directories(lodestar_c PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_link_libraries(lodestar_c PRIVATE Lodestar::core)
@@ -91,26 +170,30 @@ inline constexpr auto fragment = std::to_array<std::uint32_t>(
         list(APPEND shader_outputs "${output}")
     endforeach()
 
-    add_executable(inverseglod src/collision_collada.cpp src/main.cpp src/renderer.cpp ${shader_outputs})
+    # lodestar_render: the evaluation and preview renderer. It is never a live viewer renderer.
+    lodestar_library(lodestar_render ALIAS Lodestar::render SOURCES src/render/renderer.cpp ${shader_outputs})
+    target_include_directories(lodestar_render PUBLIC src/render PRIVATE "${shader_directory}")
+    target_link_libraries(lodestar_render PUBLIC lodestar_common PRIVATE Vulkan::Vulkan glfw)
+
+    add_executable(inverseglod src/app/collision_collada.cpp src/app/main.cpp)
     set_target_properties(inverseglod PROPERTIES CXX_EXTENSIONS OFF)
-    target_include_directories(inverseglod PRIVATE "${shader_directory}")
-    target_link_libraries(inverseglod PRIVATE Lodestar::core Vulkan::Vulkan glfw)
+    target_include_directories(inverseglod PRIVATE src/app)
+    target_link_libraries(inverseglod PRIVATE Lodestar::core lodestar_render Vulkan::Vulkan glfw)
 endif()
 
 if(PROJECT_IS_TOP_LEVEL)
-    add_library(lodestar_metrics STATIC src/mesh_metrics.cpp src/silhouette_metrics.cpp)
-    set_target_properties(lodestar_metrics PROPERTIES CXX_EXTENSIONS OFF)
-    target_include_directories(lodestar_metrics PUBLIC src)
-    target_link_libraries(lodestar_metrics PUBLIC Lodestar::core)
-
-    add_executable(lodestar_benchmark src/benchmark.cpp)
+    add_executable(lodestar_benchmark src/tools/benchmark.cpp)
     set_target_properties(lodestar_benchmark PROPERTIES CXX_EXTENSIONS OFF)
-    target_link_libraries(lodestar_benchmark PRIVATE lodestar_metrics)
+    target_link_libraries(lodestar_benchmark PRIVATE Lodestar::core)
+
+    add_executable(lodestar_metric_bench src/tools/metric_bench.cpp)
+    set_target_properties(lodestar_metric_bench PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(lodestar_metric_bench PRIVATE Lodestar::core)
 
     include(CTest)
     if(BUILD_TESTING)
         add_executable(lodestar_surface_calculus_test tests/surface_calculus.cpp)
-        target_link_libraries(lodestar_surface_calculus_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_surface_calculus_test PRIVATE lodestar_simplifier)
         add_test(NAME lodestar_surface_calculus COMMAND lodestar_surface_calculus_test)
         if(LODESTAR_BUILD_VIEWER)
             add_test(NAME lodestar_surface_calculus_cli COMMAND inverseglod --surface-lod
@@ -134,32 +217,46 @@ if(PROJECT_IS_TOP_LEVEL)
             "${CMAKE_CURRENT_SOURCE_DIR}/tests/assets/planar-scene.dae")
 
         add_executable(lodestar_collision_test tests/collision.cpp)
-        target_link_libraries(lodestar_collision_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_collision_test PRIVATE lodestar_physics)
         add_test(NAME lodestar_collision COMMAND lodestar_collision_test)
 
         add_executable(lodestar_planar_test tests/planar.cpp)
-        target_link_libraries(lodestar_planar_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_planar_test PRIVATE lodestar_simplifier)
         add_test(NAME lodestar_planar COMMAND lodestar_planar_test)
 
         add_executable(lodestar_topology_test tests/topology.cpp)
-        target_link_libraries(lodestar_topology_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_topology_test PRIVATE lodestar_simplifier)
         add_test(NAME lodestar_topology COMMAND lodestar_topology_test)
 
         add_executable(lodestar_boundary_budget_test tests/boundary_budget.cpp)
-        target_link_libraries(lodestar_boundary_budget_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_boundary_budget_test PRIVATE lodestar_simplifier)
         add_test(NAME lodestar_boundary_budget COMMAND lodestar_boundary_budget_test)
 
         add_executable(lodestar_seam_test tests/seam.cpp)
-        target_link_libraries(lodestar_seam_test PRIVATE Lodestar::core)
+        target_link_libraries(lodestar_seam_test PRIVATE lodestar_simplifier)
         add_test(NAME lodestar_seam COMMAND lodestar_seam_test)
 
         add_executable(lodestar_surface_metrics_test tests/mesh_metrics.cpp)
-        target_link_libraries(lodestar_surface_metrics_test PRIVATE lodestar_metrics)
+        target_link_libraries(lodestar_surface_metrics_test PRIVATE lodestar_common)
         add_test(NAME lodestar_surface_metrics COMMAND lodestar_surface_metrics_test)
 
         add_executable(lodestar_silhouette_metrics_test tests/silhouette_metrics.cpp)
-        target_link_libraries(lodestar_silhouette_metrics_test PRIVATE lodestar_metrics)
+        target_link_libraries(lodestar_silhouette_metrics_test PRIVATE lodestar_common)
         add_test(NAME lodestar_silhouette_metrics COMMAND lodestar_silhouette_metrics_test)
+
+        add_executable(lodestar_metric_test tests/metric.cpp)
+        target_link_libraries(lodestar_metric_test PRIVATE lodestar_common)
+        add_test(NAME lodestar_metric COMMAND lodestar_metric_test)
+
+        add_executable(lodestar_correspondence_oracle tests/correspondence_oracle.cpp)
+        target_link_libraries(lodestar_correspondence_oracle PRIVATE lodestar_common)
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            # The Python correspondence_bound is the oracle for the C++ port (needs numpy).
+            add_test(NAME lodestar_correspondence_oracle
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/correspondence_oracle_test.py"
+                $<TARGET_FILE:lodestar_correspondence_oracle>)
+        endif()
 
         add_test(NAME lodestar_benchmark_sample
             COMMAND lodestar_benchmark --quality 3 --repeats 1 --samples 128 --resolution 64)

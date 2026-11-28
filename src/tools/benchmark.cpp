@@ -1,5 +1,5 @@
-#include "mesh_metrics.hpp"
-#include "silhouette_metrics.hpp"
+#include <lodestar/mesh_metrics.hpp>
+#include <lodestar/silhouette_metrics.hpp>
 
 #include <lodestar/lodestar.hpp>
 

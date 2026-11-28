@@ -1,4 +1,4 @@
-#include "silhouette_metrics.hpp"
+#include <lodestar/silhouette_metrics.hpp>
 
 #include <algorithm>
 #include <iostream>
