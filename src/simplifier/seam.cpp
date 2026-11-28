@@ -1,6 +1,6 @@
 #include <lodestar/lodestar.hpp>
 
-#include "mesh_compaction.hpp"
+#include <lodestar/mesh_compaction.hpp>
 
 #include <algorithm>
 #include <array>

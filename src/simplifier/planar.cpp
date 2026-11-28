@@ -1,7 +1,7 @@
 #include <lodestar/lodestar.hpp>
 
-#include "mesh_compaction.hpp"
-#include "topology.hpp"
+#include <lodestar/mesh_compaction.hpp>
+#include <lodestar/topology.hpp>
 
 #include <glm/gtc/constants.hpp>
 
