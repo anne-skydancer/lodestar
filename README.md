@@ -593,3 +593,7 @@ Planar mode removes interior vertices from eligible coplanar triangle fans and r
 Topology diagnostics group edges by exact endpoint positions and report existing index sharing, boundaries, split edges, attribute seams, winding conflicts and ambiguities. A split can have matching stored attributes even when its authored connection is unknown. Assimp imports keep these unproven splits intact, which preserves intentional slits or coincident surfaces. Planar recovery uses caller-provided authored vertex identities on in-memory meshes.
 
 Assimp imports positions, normals, and UV0.xy into the mesh buffers. The sphere gate checks for UVs in all channels. Imported triangle material IDs are local to each source asset. The viewer uses a single material and normal-based lighting. The meshoptimizer comparison can change the shape. General inverse-GLOD reconstruction, analytic patches with certified error bounds, a persistent LOD cache, adaptive screen-space tessellation, and Second Life viewer integration remain research goals.
+
+## Licence
+
+Lodestar is licensed under the MIT License (`SPDX-License-Identifier: MIT`). See [LICENSE](LICENSE). Third-party dependencies keep their own licences, and test assets keep the terms described above.
