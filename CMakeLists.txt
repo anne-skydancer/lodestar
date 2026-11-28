@@ -43,6 +43,12 @@ endfunction()
 # importer). Strict floating point, so records agree across platforms.
 lodestar_library(lodestar_common ALIAS Lodestar::common SOURCES
     src/common/mesh_metrics.cpp
+    src/common/metric_geometry.cpp
+    src/common/metric_rigged.cpp
+    src/common/metric_shading.cpp
+    src/common/metric_shape.cpp
+    src/common/metric_texture.cpp
+    src/common/record.cpp
     src/common/silhouette_metrics.cpp
     src/common/topology.cpp
 )
@@ -205,6 +211,10 @@ if(PROJECT_IS_TOP_LEVEL)
         add_executable(lodestar_silhouette_metrics_test tests/silhouette_metrics.cpp)
         target_link_libraries(lodestar_silhouette_metrics_test PRIVATE lodestar_common)
         add_test(NAME lodestar_silhouette_metrics COMMAND lodestar_silhouette_metrics_test)
+
+        add_executable(lodestar_metric_test tests/metric.cpp)
+        target_link_libraries(lodestar_metric_test PRIVATE lodestar_common)
+        add_test(NAME lodestar_metric COMMAND lodestar_metric_test)
 
         add_test(NAME lodestar_benchmark_sample
             COMMAND lodestar_benchmark --quality 3 --repeats 1 --samples 128 --resolution 64)
