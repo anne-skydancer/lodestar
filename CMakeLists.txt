@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.24)
-project(Lodestar LANGUAGES C CXX)
+project(Lodestar VERSION 0.1.0 LANGUAGES C CXX)
+
+# Build only lodestar_common (glm and the standard library) and install it: the 3p-lodestar-common
+# package that the Vulkanstorm viewer links. See packaging/README.md.
+option(LODESTAR_COMMON_ONLY "Build only lodestar_common, for the 3p package" OFF)
+if(LODESTAR_COMMON_ONLY)
+    set(LODESTAR_BUILD_VIEWER OFF)
+    set(LODESTAR_COMMON_IMPORT OFF)
+endif()
 
 option(LODESTAR_BUILD_VIEWER "Build the Vulkan mesh viewer" ON)
 if(LODESTAR_BUILD_VIEWER)
@@ -21,7 +29,11 @@ set(ASSIMP_BUILD_GLTF_IMPORTER ON)
 FetchContent_Declare(assimp GIT_REPOSITORY https://github.com/assimp/assimp.git GIT_TAG v5.4.3 GIT_SHALLOW TRUE)
 FetchContent_Declare(glm GIT_REPOSITORY https://github.com/g-truc/glm.git GIT_TAG 1.0.1 GIT_SHALLOW TRUE)
 FetchContent_Declare(meshoptimizer GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git GIT_TAG v0.22 GIT_SHALLOW TRUE)
-FetchContent_MakeAvailable(assimp glm meshoptimizer)
+if(LODESTAR_COMMON_ONLY)
+    FetchContent_MakeAvailable(glm)
+else()
+    FetchContent_MakeAvailable(assimp glm meshoptimizer)
+endif()
 
 # The libraries are split by role. Each specialised library depends only on lodestar_common and
 # none depends on another one. Public headers stay together in include/lodestar.
@@ -61,6 +73,22 @@ if(MSVC OR CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     target_compile_options(lodestar_common PRIVATE /fp:strict)
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang)$")
     target_compile_options(lodestar_common PRIVATE -fno-fast-math -ffp-contract=off)
+endif()
+
+if(LODESTAR_COMMON_ONLY)
+    include(GNUInstallDirs)
+    install(TARGETS lodestar_common ARCHIVE DESTINATION lib COMPONENT common)
+    install(FILES
+        include/lodestar/lodestar.hpp
+        include/lodestar/surface_calculus.hpp
+        include/lodestar/record.hpp
+        include/lodestar/metric.hpp
+        include/lodestar/mesh_metrics.hpp
+        include/lodestar/silhouette_metrics.hpp
+        include/lodestar/topology.hpp
+        DESTINATION include/lodestar COMPONENT common)
+    install(FILES LICENSE DESTINATION LICENSES RENAME lodestar-common.txt COMPONENT common)
+    return()
 endif()
 
 # lodestar_simplifier: LOD generation and analysis (meshoptimizer, planar, seam, surface fit).
