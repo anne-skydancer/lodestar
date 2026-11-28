@@ -216,6 +216,16 @@ if(PROJECT_IS_TOP_LEVEL)
         target_link_libraries(lodestar_metric_test PRIVATE lodestar_common)
         add_test(NAME lodestar_metric COMMAND lodestar_metric_test)
 
+        add_executable(lodestar_correspondence_oracle tests/correspondence_oracle.cpp)
+        target_link_libraries(lodestar_correspondence_oracle PRIVATE lodestar_common)
+        find_package(Python3 COMPONENTS Interpreter)
+        if(Python3_Interpreter_FOUND)
+            # The Python correspondence_bound is the oracle for the C++ port (needs numpy).
+            add_test(NAME lodestar_correspondence_oracle
+                COMMAND "${Python3_EXECUTABLE}" -B "${CMAKE_CURRENT_SOURCE_DIR}/tests/correspondence_oracle_test.py"
+                $<TARGET_FILE:lodestar_correspondence_oracle>)
+        endif()
+
         add_test(NAME lodestar_benchmark_sample
             COMMAND lodestar_benchmark --quality 3 --repeats 1 --samples 128 --resolution 64)
         set_tests_properties(lodestar_benchmark_sample PROPERTIES
