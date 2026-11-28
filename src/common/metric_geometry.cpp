@@ -215,6 +215,7 @@ Closest Bvh::nearest(const dvec3& p) const {
 Closest Bvh::nearestMatching(const dvec3& p, const dvec3& dir, double angle, MatchMode mode) const {
     Closest best;
     if (nodes_.empty() || cones_.empty()) return best;
+    const double cosAngle = std::cos(angle);
     uint32_t stack[96];
     int top = 0;
     stack[top++] = 0;
@@ -226,19 +227,19 @@ Closest Bvh::nearestMatching(const dvec3& p, const dvec3& dir, double angle, Mat
     while (top > 0) {
         const Node& node = nodes_[stack[--top]];
         if (boxDistanceSquared(node.lo, node.hi, p) >= best.distanceSquared) continue;
-        if (node.halfAngle < pi && angleBetween(dir, node.axis) - node.halfAngle > angle) continue;
+        if (node.halfAngle + angle < pi && glm::dot(dir, node.axis) < std::cos(node.halfAngle + angle)) continue;
         if (node.count > 0) {
             for (uint32_t i = 0; i < node.count; ++i) {
                 const uint32_t t = order_[node.first + i];
                 const auto& tri = surface_->tris[t];
                 if (mode == MatchMode::Outside) {
                     const auto& c = cones_[t];
-                    if (c.half < pi && angleBetween(dir, c.axis) - c.half > angle) continue;
+                    if (c.half + angle < pi && glm::dot(dir, c.axis) < std::cos(c.half + angle)) continue;
                     consider(closestOnTriangle(p, tri.p[0], tri.p[1], tri.p[2]), t);
                 } else {
                     int matching = 0;
                     for (int k = 0; k < 3; ++k) {
-                        if (glm::dot(tri.n[k], tri.n[k]) > 0.0 && angleBetween(dir, tri.n[k]) <= angle) {
+                        if (glm::dot(tri.n[k], tri.n[k]) > 0.0 && glm::dot(dir, tri.n[k]) >= cosAngle) {
                             ++matching;
                             consider(tri.p[k], t);
                         }
@@ -247,8 +248,10 @@ Closest Bvh::nearestMatching(const dvec3& p, const dvec3& dir, double angle, Mat
                 }
             }
         } else {
-            stack[top++] = node.right;
-            stack[top++] = node.left;
+            const double dl = boxDistanceSquared(nodes_[node.left].lo, nodes_[node.left].hi, p);
+            const double dr = boxDistanceSquared(nodes_[node.right].lo, nodes_[node.right].hi, p);
+            if (dl <= dr) { stack[top++] = node.right; stack[top++] = node.left; }
+            else { stack[top++] = node.left; stack[top++] = node.right; }
         }
     }
     return best;

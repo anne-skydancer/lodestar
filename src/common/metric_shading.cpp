@@ -61,6 +61,19 @@ double directedCertified(const Prepared& from, const Prepared& to, double grid, 
                          const Options& options, std::size_t cap) {
     if (from.surface->tris.empty()) return 0.0;
     if (to.surface->tris.empty()) return inf;
+    // Pieces must shrink until their normals spread less than the angle; each split halves the
+    // spread. If that needs more pieces than the budget, the certificate is not affordable.
+    {
+        double pieces = 0.0;
+        for (const auto& t : from.surface->tris) {
+            const dvec3 ref = unit(t.n[0] + t.n[1] + t.n[2]);
+            double delta = 0.0;
+            for (const auto& n : t.n) delta = std::max(delta, glm::dot(n, n) > 0.0 ? angleBetween(ref, unit(n)) : inf);
+            const double levels = delta < angle ? 0.0 : std::ceil(std::log2(delta / angle)) + 1.0;
+            pieces += std::exp2(2.0 * levels);
+            if (pieces > static_cast<double>(cap)) return inf;
+        }
+    }
     ConeSearch search{*to.bvh, angle};
     std::vector<NPiece> heap, finals;
     for (const auto& t : from.surface->tris) {
@@ -71,7 +84,7 @@ double directedCertified(const Prepared& from, const Prepared& to, double grid, 
         (p.rho < grid ? finals : heap).push_back(p);
     }
     std::make_heap(heap.begin(), heap.end(), lowerUpper);
-    while (!heap.empty() && heap.front().upper > std::max(options.ratio * witness, grid) && search.queries < cap) {
+    while (!heap.empty() && heap.front().upper > options.ratio * witness + options.gridSlack * grid && search.queries < cap) {
         std::pop_heap(heap.begin(), heap.end(), lowerUpper);
         const NPiece parent = heap.back();
         heap.pop_back();
@@ -110,7 +123,12 @@ double directedWitness(const Prepared& from, const Prepared& to, double angle) {
         const Closest q = to.bvh->nearestMatching(p, unit(n), angle, MatchMode::Outside);
         worst = std::max(worst, q.distanceSquared < inf ? std::sqrt(q.distanceSquared) : inf);
     };
-    for (const auto& t : from.surface->tris) {
+    // Any subset of samples is a valid lower bound; a fixed stride bounds the cost on large meshes.
+    constexpr std::size_t maxTriangles = 256;
+    const std::size_t count = from.surface->tris.size();
+    const std::size_t stride = std::max<std::size_t>(1, (count + maxTriangles - 1) / maxTriangles);
+    for (std::size_t i = 0; i < count; i += stride) {
+        const auto& t = from.surface->tris[i];
         for (int k = 0; k < 3; ++k) sample(t.p[k], t.n[k]);
         sample((t.p[0] + t.p[1] + t.p[2]) / 3.0, t.n[0] + t.n[1] + t.n[2]);
     }
@@ -136,7 +154,7 @@ ShadingResult shadingBetween(Prepared& high, Prepared& lod, const TextureResult&
     if (overlay > options.ratio * r.witness + grid) {
         // Try the cone certificate when the overlay one is absent or loose.
         const std::size_t triangles = lod.surface->tris.size() + high.surface->tris.size();
-        const std::size_t cap = options.baseQueries + 16 * triangles;
+        const std::size_t cap = options.baseQueries / 40 + 3 * triangles;
         const double ab = directedCertified(lod, high, grid, angle, r.witness, options, cap);
         const double ba = std::isfinite(ab) ? directedCertified(high, lod, grid, angle, r.witness, options, cap) : inf;
         cones = std::max(ab, ba);

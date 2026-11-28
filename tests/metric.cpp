@@ -141,7 +141,7 @@ void testSoundnessAgainstSampled() {
     }
     // The spike is the error: U must reach it.
     const auto spike = shapeBound(cases.back().high, cases.back().low);
-    require(spike.upper >= 0.4 * 0.99, "spike height is covered");
+    require(spike.upper >= 0.38 && spike.upper <= 0.41, "spike height is covered");
     // Per-axis form: with unit scale it is at least the scalar bound's witness.
     LodRecord lod;
     const auto shape = shapeBound(cases[0].high, cases[0].low);
@@ -150,6 +150,31 @@ void testSoundnessAgainstSampled() {
         lod.axisRadius[a] = float(shape.axisRadius[a]);
     }
     require(shapeUpperUnderScale(lod, {1, 1, 1}) >= shape.witness * (1 - 1e-6), "per-axis form covers W");
+}
+
+void testRandomised() {
+    // Random heightfields against random coarser ones, and a vertex-jittered copy: U must never
+    // fall below the sampled maximum, and W never above U.
+    std::mt19937 rng(2026);
+    std::uniform_real_distribution<double> uniform(-1.0, 1.0);
+    int worstCount = 0;
+    for (int seed = 0; seed < 40; ++seed) {
+        const double a = uniform(rng), b = uniform(rng), c = uniform(rng), d = uniform(rng);
+        const Height h = [=](double x, double y) { return 0.15 * a * std::sin(7 * x + b) + 0.1 * c * std::cos(9 * y + d) + 0.05 * x * y; };
+        const int n = 8 + seed % 9;
+        Mesh high = gridMesh(n, h);
+        Mesh low = gridMesh(2 + seed % 4, h, seed % 2 == 1);
+        if (seed % 5 == 0) {
+            for (auto& v : low.vertices) v.position += glm::vec3(float(0.01 * uniform(rng)), float(0.02 * uniform(rng)), float(0.01 * uniform(rng)));
+            computeNormals(low);
+        }
+        const auto shape = shapeBound(high, low);
+        const double sampled = sampledMaximum(high, low);
+        require(shape.upper >= sampled * (1 - 1e-12), "random case " + std::to_string(seed) + ": U below the sampled maximum");
+        require(shape.witness <= shape.upper, "random case " + std::to_string(seed) + ": W above U");
+        if (shape.upper > 1.1 * shape.witness + 1e-4) ++worstCount;
+    }
+    require(worstCount <= 2, "random cases: U within 1.1 W almost always");
 }
 
 void testPerAxisScaleSound() {
@@ -403,6 +428,8 @@ int main() {
         std::puts("soundness against the sampled metrics");
         testSoundnessAgainstSampled();
         testPerAxisScaleSound();
+        std::puts("randomised soundness");
+        testRandomised();
         std::puts("identical LODs");
         testIdentical();
         std::puts("texture");

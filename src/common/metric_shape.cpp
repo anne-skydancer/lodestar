@@ -11,6 +11,8 @@
 #include "metric_internal.hpp"
 
 #include <algorithm>
+#include <bit>
+#include <unordered_map>
 #include <cmath>
 
 namespace lodestar::metric::detail {
@@ -27,45 +29,73 @@ struct Piece {
 
 dvec3 absolute(const dvec3& v) { return glm::abs(v); }
 
+struct PointKey {
+    uint64_t x, y, z;
+    bool operator==(const PointKey&) const = default;
+};
+struct PointHash {
+    std::size_t operator()(const PointKey& k) const {
+        uint64_t h = k.x * 0x9E3779B97F4A7C15ULL;
+        h = (h ^ (h >> 32) ^ k.y) * 0xC2B2AE3D27D4EB4FULL;
+        h = (h ^ (h >> 29) ^ k.z) * 0x165667B19E3779F9ULL;
+        return static_cast<std::size_t>(h ^ (h >> 32));
+    }
+};
+
 struct Searcher {
     const Bvh& to;
     double ratio;
+    double gridSlack;
     double grid;
     double witness = 0.0;
     std::size_t queries = 0;
+    // Piece corners are shared between neighbours and siblings (a midpoint is computed from the same
+    // two endpoints), so their nearest-triangle queries are cached by exact position.
+    std::unordered_map<PointKey, Closest, PointHash> corners;
+
+    const Closest& cornerNearest(const dvec3& p) {
+        const PointKey key{std::bit_cast<uint64_t>(p.x), std::bit_cast<uint64_t>(p.y), std::bit_cast<uint64_t>(p.z)};
+        const auto [it, inserted] = corners.try_emplace(key);
+        if (inserted) {
+            it->second = to.nearest(p);
+            ++queries;
+        }
+        return it->second;
+    }
 
     // Fill a piece's bound from its corners. Returns after possibly refining with candidate triangles.
     void evaluate(Piece& p) {
         const dvec3 c = (p.v[0] + p.v[1] + p.v[2]) / 3.0;
         p.rho = std::max({glm::length(p.v[0] - c), glm::length(p.v[1] - c), glm::length(p.v[2] - c)});
+        p.upper = inf;
+        p.offset = p.radius = dvec3(inf);
+        // The corners first: their distances are exact witnesses, and their nearest triangles are
+        // the candidates for the convexity bound (no centroid query when that already suffices).
+        std::array<uint32_t, 3> candidates{};
+        int count = 0;
+        for (int i = 0; i < 3; ++i) {
+            const Closest& qi = cornerNearest(p.v[i]);
+            if (!(qi.distanceSquared < inf)) return;
+            witness = std::max(witness, std::sqrt(qi.distanceSquared));
+            if (std::find(candidates.begin(), candidates.begin() + count, qi.tri) == candidates.begin() + count)
+                candidates[count++] = qi.tri;
+        }
+        for (int i = 0; i < count; ++i) tryTriangle(p, candidates[i]);
+        if (p.upper <= ratio * witness + gridSlack * grid) return;
+        // The Lipschitz bound at the centroid.
         const Closest q = to.nearest(c);
         ++queries;
-        if (!(q.distanceSquared < inf)) {
-            p.upper = inf;
-            p.offset = p.radius = dvec3(inf);
-            return;
-        }
+        if (!(q.distanceSquared < inf)) return;
         const double dc = std::sqrt(q.distanceSquared);
         witness = std::max(witness, dc);
-        p.upper = dc + p.rho;
-        p.offset = absolute(c - q.point);
-        p.radius = glm::max(glm::max(absolute(p.v[0] - c), absolute(p.v[1] - c)), absolute(p.v[2] - c));
-        if (p.upper <= std::max(ratio * witness, grid)) return;
-        tryTriangle(p, q.tri);
-        if (p.upper <= std::max(ratio * witness, grid)) return;
-        // Look at the corners: their own nearest triangles are candidates too, and their distances
-        // are exact witnesses.
-        uint32_t tried = q.tri;
-        for (int i = 0; i < 3; ++i) {
-            const Closest qi = to.nearest(p.v[i]);
-            ++queries;
-            if (!(qi.distanceSquared < inf)) continue;
-            witness = std::max(witness, std::sqrt(qi.distanceSquared));
-            if (qi.tri != tried) {
-                tryTriangle(p, qi.tri);
-                tried = qi.tri;
-            }
+        if (dc + p.rho < p.upper) {
+            p.upper = dc + p.rho;
+            p.offset = absolute(c - q.point);
+            p.radius = glm::max(glm::max(absolute(p.v[0] - c), absolute(p.v[1] - c)), absolute(p.v[2] - c));
         }
+        if (p.upper <= ratio * witness + gridSlack * grid) return;
+        if (std::find(candidates.begin(), candidates.begin() + count, q.tri) == candidates.begin() + count)
+            tryTriangle(p, q.tri);
     }
 
     // Bound by the convexity of the distance to one target triangle.
@@ -98,7 +128,7 @@ DirectedShape directedShape(const Prepared& from, const Prepared& to, double gri
         out.upper = out.witness = inf;
         return out;
     }
-    Searcher search{*to.bvh, options.ratio, grid};
+    Searcher search{*to.bvh, options.ratio, options.gridSlack, grid};
     std::vector<Piece> heap, finals;
     heap.reserve(from.surface->tris.size());
     for (std::size_t i = 0; i < from.surface->tris.size(); ++i) {
@@ -111,7 +141,7 @@ DirectedShape directedShape(const Prepared& from, const Prepared& to, double gri
     }
     std::make_heap(heap.begin(), heap.end(), lowerUpper);
     while (!heap.empty()) {
-        const double stop = std::max(options.ratio * search.witness, grid);
+        const double stop = options.ratio * search.witness + options.gridSlack * grid;
         if (heap.front().upper <= stop) break;
         if (search.queries >= queryCap) {
             out.capped = true;

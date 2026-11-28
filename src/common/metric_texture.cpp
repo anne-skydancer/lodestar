@@ -15,11 +15,23 @@ using glm::dvec3;
 
 double cross2(const dvec2& a, const dvec2& b) { return a.x * b.y - a.y * b.x; }
 
-using Polygon = std::vector<dvec2>;
+// A convex polygon from clipping a triangle by three half-planes has at most six corners.
+struct Polygon {
+    std::array<dvec2, 8> p;
+    std::size_t n = 0;
+    void push_back(const dvec2& v) { p[n++] = v; }
+    std::size_t size() const { return n; }
+    bool empty() const { return n == 0; }
+    const dvec2& back() const { return p[n - 1]; }
+    const dvec2* begin() const { return p.data(); }
+    const dvec2* end() const { return p.data() + n; }
+    const dvec2& operator[](std::size_t i) const { return p[i]; }
+};
 
 // Clip `first` by the half-planes of `second`'s edges, as the Python _intersection does.
 Polygon intersection(const std::array<dvec2, 3>& first, const std::array<dvec2, 3>& second) {
-    Polygon polygon(first.begin(), first.end());
+    Polygon polygon;
+    for (const auto& v : first) polygon.push_back(v);
     for (int e = 0; e < 3; ++e) {
         const dvec2 a = second[e], b = second[(e + 1) % 3];
         if (polygon.empty()) break;
@@ -97,6 +109,8 @@ struct Grid {
     dvec2 cell{1.0};
     int n = 1;
     std::vector<std::vector<uint32_t>> cells;
+    // Faces that span many cells (large or tiled UV ranges) are tested against every query.
+    std::vector<uint32_t> big;
 
     explicit Grid(const std::vector<Face>& faces) {
         dvec2 lo(std::numeric_limits<double>::infinity()), hi(-std::numeric_limits<double>::infinity());
@@ -113,6 +127,10 @@ struct Grid {
         for (uint32_t i = 0; i < faces.size(); ++i) {
             if (!faces[i].valid) continue;
             const auto [x0, y0, x1, y1] = range(faces[i].lo, faces[i].hi);
+            if ((x1 - x0 + 1) * (y1 - y0 + 1) > 16) {
+                big.push_back(i);
+                continue;
+            }
             for (int y = y0; y <= y1; ++y)
                 for (int x = x0; x <= x1; ++x) cells[static_cast<std::size_t>(y) * n + x].push_back(i);
         }
@@ -152,6 +170,9 @@ Correspondence correspondenceBound(const Chart& source, const Chart& target, con
     std::vector<double> targetCovered(dst.size(), 0.0);
     std::vector<uint32_t> stamp(dst.size(), 0);
     uint32_t stampValue = 0;
+    std::size_t visits = 0;
+    // The witness pass is optional (any subset of samples is a lower bound): bound its total work.
+    std::size_t witnessBudget = 4000000;
     double surfaceError = 0.0, normalAngle = 0.0, witness = 0.0;
     std::vector<uint32_t> candidates;
     struct Cell { uint32_t other; Polygon polygon; };
@@ -163,18 +184,24 @@ Correspondence correspondenceBound(const Chart& source, const Chart& target, con
         candidates.clear();
         ++stampValue;
         if (!grid.cells.empty()) {
+            const auto visit = [&](uint32_t t) {
+                ++visits;
+                if (stamp[t] == stampValue) return;
+                stamp[t] = stampValue;
+                const Face& other = dst[t];
+                if (glm::all(glm::greaterThanEqual(other.hi, face.lo)) && glm::all(glm::lessThanEqual(other.lo, face.hi)) &&
+                    (source.materials.empty() || target.materials.empty() || other.material == face.material))
+                    candidates.push_back(t);
+            };
             const auto [x0, y0, x1, y1] = grid.range(face.lo, face.hi);
             for (int y = y0; y <= y1; ++y)
                 for (int x = x0; x <= x1; ++x)
-                    for (const uint32_t t : grid.cells[static_cast<std::size_t>(y) * grid.n + x]) {
-                        if (stamp[t] == stampValue) continue;
-                        stamp[t] = stampValue;
-                        const Face& other = dst[t];
-                        if (glm::all(glm::greaterThanEqual(other.hi, face.lo)) &&
-                            glm::all(glm::lessThanEqual(other.lo, face.hi)) &&
-                            (source.materials.empty() || target.materials.empty() || other.material == face.material))
-                            candidates.push_back(t);
-                    }
+                    for (const uint32_t t : grid.cells[static_cast<std::size_t>(y) * grid.n + x]) visit(t);
+            for (const uint32_t t : grid.big) visit(t);
+        }
+        if (visits > 4 * options.overlayPairLimit) {
+            out.limitExceeded = true;
+            break;
         }
         out.pairs += candidates.size();
         if (out.pairs > options.overlayPairLimit) {
@@ -199,16 +226,17 @@ Correspondence correspondenceBound(const Chart& source, const Chart& target, con
                 surfaceError = std::max(surfaceError, glm::length(mix(before, face.pos) - mix(after, other.pos)));
             }
             if (!constantNormals && useNormals) {
-                std::vector<dvec3> beforeNormals, afterNormals;
+                std::array<dvec3, 8> beforeNormals, afterNormals;
+                std::size_t normalCount = 0;
                 for (const dvec2& p : polygon) {
                     dvec3 before, after;
                     if (!weights(p, face.uv, before) || !weights(p, other.uv, after)) continue;
-                    beforeNormals.push_back(mix(before, face.nrm));
-                    afterNormals.push_back(mix(after, other.nrm));
+                    beforeNormals[normalCount] = mix(before, face.nrm);
+                    afterNormals[normalCount++] = mix(after, other.nrm);
                 }
                 dvec3 reference(0.0);
-                for (const auto& n : beforeNormals) reference += n;
-                reference /= static_cast<double>(std::max<std::size_t>(beforeNormals.size(), 1));
+                for (std::size_t i = 0; i < normalCount; ++i) reference += beforeNormals[i];
+                reference /= static_cast<double>(std::max<std::size_t>(normalCount, 1));
                 const double length = glm::length(reference);
                 if (length == 0) {
                     out.normalsDegenerate = true;
@@ -216,7 +244,7 @@ Correspondence correspondenceBound(const Chart& source, const Chart& target, con
                 }
                 double floorValue = std::numeric_limits<double>::infinity();
                 double difference = 0.0;
-                for (std::size_t i = 0; i < beforeNormals.size(); ++i) {
+                for (std::size_t i = 0; i < normalCount; ++i) {
                     floorValue = std::min(floorValue, glm::dot(beforeNormals[i], reference / length));
                     difference = std::max(difference, glm::length(beforeNormals[i] - afterNormals[i]));
                 }
@@ -233,7 +261,11 @@ Correspondence correspondenceBound(const Chart& source, const Chart& target, con
             cells.push_back({t, std::move(polygon)});
         }
         // Witness: at each cell vertex, the nearest of all target faces that contain the point.
+        // Skipped for a face with a very large candidate list (any subset of samples stays a lower bound).
         for (const Cell& cell : cells) {
+            const std::size_t cost = candidates.size() * cell.polygon.size();
+            if (cost > witnessBudget) break;
+            witnessBudget -= cost;
             for (const dvec2& p : cell.polygon) {
                 dvec3 before;
                 if (!weights(p, face.uv, before)) continue;

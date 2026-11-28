@@ -158,6 +158,10 @@ if(PROJECT_IS_TOP_LEVEL)
     set_target_properties(lodestar_benchmark PROPERTIES CXX_EXTENSIONS OFF)
     target_link_libraries(lodestar_benchmark PRIVATE Lodestar::core)
 
+    add_executable(lodestar_metric_bench src/tools/metric_bench.cpp)
+    set_target_properties(lodestar_metric_bench PROPERTIES CXX_EXTENSIONS OFF)
+    target_link_libraries(lodestar_metric_bench PRIVATE Lodestar::core)
+
     include(CTest)
     if(BUILD_TESTING)
         add_executable(lodestar_surface_calculus_test tests/surface_calculus.cpp)

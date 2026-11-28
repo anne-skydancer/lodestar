@@ -22,11 +22,14 @@ struct Options {
     // The 16-bit position grid as a fraction of the largest High extent. Pieces and errors below
     // it are not refined further.
     double gridFraction = 1.0 / 65535.0;
+    // The search also stops when U - ratio * W is below this many grid steps: two quantised meshes
+    // cannot be told apart more finely than about a step.
+    double gridSlack = 2.0;
     // Work cap: distance queries per source triangle, plus a fixed base.
-    std::size_t queriesPerTriangle = 24;
-    std::size_t baseQueries = 200000;
+    std::size_t queriesPerTriangle = 6;
+    std::size_t baseQueries = 60000;
     // Work cap of the UV overlay (candidate triangle pairs).
-    std::size_t overlayPairLimit = 4000000;
+    std::size_t overlayPairLimit = 300000;
     // A High normal matches a LOD normal within this angle.
     double normalAngleDegrees = 0.5;
 };
